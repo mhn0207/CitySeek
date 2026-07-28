@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+  <title>资料编辑</title>
+  <link rel="stylesheet" href="./css/element.css">
+  <link href="./css/main.css" rel="stylesheet">
+  <link href="./css/info.css" rel="stylesheet">
+  <style>
+    .edit-container {
+      padding: 56px 12px 80px;
+    }
+    .profile-form {
+      padding: 18px 16px 6px;
+    }
+    .avatar-preview {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .avatar-preview img {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      object-fit: cover;
+    }
+    .save-button {
+      width: 100%;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div class="header">
+    <div class="header-back-btn" @click="goBack"><i class="el-icon-arrow-left"></i></div>
+    <div class="header-title">资料编辑&nbsp;&nbsp;&nbsp;</div>
+  </div>
+
+  <div class="edit-container">
+    <div class="info-box profile-form">
+      <div class="avatar-preview">
+        <img :src="form.icon || '/imgs/icons/default-icon.png'" alt="用户头像">
+        <div>头像预览</div>
+      </div>
+
+      <el-form :model="form" label-position="top">
+        <el-form-item label="昵称" required>
+          <el-input v-model.trim="form.nickName" maxlength="32" show-word-limit></el-input>
+        </el-form-item>
+
+        <el-form-item label="头像地址">
+          <el-input v-model.trim="form.icon" maxlength="255" placeholder="例如 /imgs/icons/default-icon.png"></el-input>
+        </el-form-item>
+
+        <el-form-item label="个人介绍">
+          <el-input
+            v-model="form.introduce"
+            type="textarea"
+            :rows="3"
+            maxlength="128"
+            show-word-limit
+            placeholder="介绍一下自己">
+          </el-input>
+        </el-form-item>
+
+        <el-form-item label="性别">
+          <el-radio-group v-model="form.gender">
+            <el-radio :label="false">男</el-radio>
+            <el-radio :label="true">女</el-radio>
+          </el-radio-group>
+        </el-form-item>
+
+        <el-form-item label="城市">
+          <el-input v-model.trim="form.city" maxlength="64" placeholder="请输入所在城市"></el-input>
+        </el-form-item>
+
+        <el-form-item label="生日">
+          <el-date-picker
+            v-model="form.birthday"
+            type="date"
+            value-format="yyyy-MM-dd"
+            :picker-options="birthdayOptions"
+            placeholder="选择生日"
+            style="width: 100%">
+          </el-date-picker>
+        </el-form-item>
+
+        <el-button
+          class="save-button"
+          type="primary"
+          :loading="saving"
+          @click="saveProfile">
+          保存资料
+        </el-button>
+      </el-form>
+    </div>
+  </div>
+
+  <foot-bar :active-btn="4"></foot-bar>
+</div>
+<script src="./js/vue.js"></script>
+<script src="./js/axios.min.js"></script>
+<script src="./js/element.js"></script>
+<script src="./js/common.js"></script>
+<script src="./js/footer.js"></script>
+<script>
+  const app = new Vue({
+    el: "#app",
+    data: {
+      user: {},
+      saving: false,
+      birthdayOptions: {
+        disabledDate(time) {
+          return time.getTime() > Date.now();
+        }
+      },
+      form: {
+        nickName: "",
+        icon: "",
+        introduce: "",
+        gender: null,
+        city: "",
+        birthday: null,
+      },
+    },
+    created() {
+      this.loadProfile();
+    },
+    methods: {
+      loadProfile() {
+        axios.get("/user/me")
+          .then(({data}) => {
+            this.user = data;
+            return axios.get("/user/info/" + data.id);
+          })
+          .then(({data}) => {
+            const info = data || {};
+            this.form = {
+              nickName: this.user.nickName || "",
+              icon: this.user.icon || "",
+              introduce: info.introduce || "",
+              gender: info.gender === true ? true : (info.gender === false ? false : null),
+              city: info.city || "",
+              birthday: info.birthday || null,
+            };
+          })
+          .catch(err => {
+            this.$message.error(err);
+            setTimeout(() => location.href = "login.html", 800);
+          });
+      },
+      saveProfile() {
+        const nickName = (this.form.nickName || "").trim();
+        if (!nickName) {
+          this.$message.warning("昵称不能为空");
+          return;
+        }
+        this.saving = true;
+        axios.put("/user/profile", {...this.form, nickName})
+          .then(({data}) => {
+            this.user = data;
+            sessionStorage.setItem("userInfo", JSON.stringify({
+              introduce: this.form.introduce,
+              gender: this.form.gender,
+              city: this.form.city,
+              birthday: this.form.birthday,
+            }));
+            this.$message.success("资料保存成功");
+            setTimeout(() => location.href = "info.html", 500);
+          })
+          .catch(err => {
+            this.$message.error(err);
+            this.saving = false;
+          });
+      },
+      goBack() {
+        history.back();
+      },
+    },
+  });
+</script>
+</body>
+</html>
