@@ -1,5 +1,10 @@
 # CitySeek 投递前改造方案
 
+> **状态：规划中，尚未实施。**
+>
+> 本文档描述目标设计与验收标准；只有代码、数据库迁移、自动化测试均完成，并在第 11 节勾选后，
+> 对应能力才可以写入 README、简历或项目介绍。
+
 ## 1. 目标与范围
 
 本文档针对 CitySeek 当前代码中的五项重点问题制定可执行方案：
@@ -100,6 +105,13 @@ private Double x;
 private Double y;
 ```
 
+`x`、`y` 按全球合法经纬度设计，因此数据库列必须允许负数。现有 `tb_shop.x/y` 使用
+`UNSIGNED`，实施 DTO 前先执行独立迁移，将它们改成有符号 `DOUBLE NOT NULL`。
+
+`sold`、`comments` 和 `score` 是系统统计字段，不进入创建请求。创建商铺时由服务端统一初始化为
+`0`；数据库同时增加 `DEFAULT 0` 作为兜底。`score = 0` 表示暂未产生评分，有评分后的合法范围为
+`10～50`。
+
 #### `ShopUpdateRequest`
 
 必须包含 `id`。只开放允许修改的字段，不允许客户端修改销量、评论数、创建时间等系统字段。
@@ -139,16 +151,34 @@ private Double y;
 当前项目规模较小，第一阶段使用显式手工映射，不立即引入 MapStruct：
 
 ```java
+// 仅用于创建商铺；更新映射不能重置系统统计字段
 Shop shop = new Shop()
         .setName(request.getName().trim())
         .setTypeId(request.getTypeId())
         .setImages(request.getImages())
         .setAddress(request.getAddress().trim())
         .setX(request.getX())
-        .setY(request.getY());
+        .setY(request.getY())
+        .setSold(0)
+        .setComments(0)
+        .setScore(0);
 ```
 
 显式映射能够清楚展示哪些字段允许从外部进入领域模型。
+
+对应数据库迁移：
+
+```sql
+ALTER TABLE tb_shop
+    MODIFY COLUMN x double NOT NULL COMMENT '经度，-180～180',
+    MODIFY COLUMN y double NOT NULL COMMENT '纬度，-90～90',
+    MODIFY COLUMN sold int UNSIGNED NOT NULL DEFAULT 0 COMMENT '销量',
+    MODIFY COLUMN comments int UNSIGNED NOT NULL DEFAULT 0 COMMENT '评论数量',
+    MODIFY COLUMN score int UNSIGNED NOT NULL DEFAULT 0
+        COMMENT '评分乘10保存；0表示暂无评分，正常范围10～50';
+```
+
+不要只修改最终初始化脚本；该 SQL 应保存为独立迁移，并由 Testcontainers 使用同一迁移验证。
 
 ### 3.4 异常与响应
 
@@ -180,13 +210,16 @@ exception/
 - 客户端提交 `liked`、`comments` 等字段时无法影响数据库；
 - 秒杀开始时间晚于结束时间返回 400；
 - 标题、内容、图片字段长度与数据库约束一致；
-- Service 映射后系统字段由服务端赋值。
+- Service 映射后系统字段由服务端赋值；
+- 新建商铺未传 `sold`、`comments`、`score` 时可以成功保存且三者均为 0；
+- 西经或南纬的合法坐标可以通过校验并写入数据库。
 
 ### 3.6 验收标准
 
 - 写接口不再直接接收数据库实体；
 - 所有新增 DTO 使用 `@Valid`；
 - 参数错误不再被统一处理成 HTTP 500；
+- DTO 约束与数据库有符号范围、非空字段和默认值保持一致；
 - 前端现有正常请求保持兼容。
 
 ## 4. 方案二：修复商铺 GEO 残留
@@ -613,17 +646,31 @@ CREATE TABLE tb_outbox_event (
     retry_count int NOT NULL DEFAULT 0,
     next_retry_time timestamp NULL DEFAULT NULL,
     error_message varchar(512) NULL,
+    claimed_by varchar(128) NULL,
+    claim_token varchar(64) NULL,
+    processing_deadline timestamp NULL DEFAULT NULL,
     create_time timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
     update_time timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
         ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
-    KEY idx_outbox_dispatch (
+    KEY idx_outbox_pending (
         status,
         next_retry_time,
+        create_time
+    ),
+    KEY idx_outbox_processing (
+        status,
+        processing_deadline,
         create_time
     )
 );
 ```
+
+`claimed_by` 用于审计当前领取实例，`claim_token` 是每次领取生成的唯一 fencing token，
+`processing_deadline` 是处理租约截止时间。直接写 Redis 的 Worker 和后续 RabbitMQ Publisher
+都必须复用这套租约规则。它们用于恢复“任务已经改成 `PROCESSING`，但执行实例在投递完成前宕机”
+的情况，不能省略。完成、失败和续租操作都必须携带本次 `claim_token`；条件更新影响行数为 0 时，
+说明租约已经丢失，旧执行者必须停止更新状态。
 
 事件示例：
 
@@ -664,28 +711,39 @@ feed/
 
 处理步骤：
 
-1. 批量领取 `PENDING` 或到达重试时间的事件；
-2. 将事件改成 `PROCESSING`，避免同实例重复领取；
-3. 按主键分页查询粉丝，避免一次性加载全部数据；
-4. 使用 Redis Pipeline 批量执行 `ZADD`；
-5. 全部完成后标记 `SUCCESS`；
-6. 失败后增加 `retry_count`，记录摘要错误；
-7. 使用指数退避设置 `next_retry_time`；
-8. 超过重试上限标记 `FAILED` 并告警。
+1. 批量领取已到达重试时间的 `PENDING`，或租约已经过期的 `PROCESSING` 事件；
+2. 重新领取过期 `PROCESSING` 时增加 `retry_count`；达到上限则直接标记 `FAILED`；
+3. 在同一个短事务内写入 `PROCESSING`、唯一 `claim_token`、`claimed_by` 和新的租约截止时间；
+4. 按主键分页查询粉丝，避免一次性加载全部数据；
+5. 使用 Redis Pipeline 批量执行 `ZADD`；
+6. 处理时间可能超过租约时，使用 `id + claim_token` 条件更新续租；
+7. 全部完成后用 `id + claim_token` 条件更新为 `SUCCESS`，并清空领取和租约字段；
+8. 可重试失败时增加 `retry_count`、记录摘要、恢复为 `PENDING`、设置指数退避时间并清空租约；
+9. 超过重试上限时标记 `FAILED`、清空租约并告警。
 
 多实例下需要安全领取任务。MySQL 8 可以使用：
 
 ```sql
 SELECT ...
 FROM tb_outbox_event
-WHERE status = 'PENDING'
-  AND (next_retry_time IS NULL OR next_retry_time <= NOW())
+WHERE (
+        status = 'PENDING'
+        AND (next_retry_time IS NULL OR next_retry_time <= NOW())
+      )
+   OR (
+        status = 'PROCESSING'
+        AND processing_deadline <= NOW()
+      )
 ORDER BY create_time
 LIMIT ?
 FOR UPDATE SKIP LOCKED;
 ```
 
-领取和状态更新在短事务内完成，Redis 投递不持有数据库锁。
+领取查询、重试次数处理、`PROCESSING` 状态更新和租约写入必须在同一个短事务内完成；提交后再执行
+Redis 投递，网络操作期间不持有数据库锁。Worker 宕机后，其他实例会在租约到期后重新领取任务；
+Redis `ZADD` 的幂等性保证从头重放安全。旧 Worker 即使恢复，也只能执行
+`WHERE id = ? AND status = 'PROCESSING' AND claim_token = ?` 的条件更新，不能覆盖新租约持有者的
+处理结果。
 
 ### 7.6 幂等性
 
@@ -736,7 +794,8 @@ ZADD feed:{userId} publishedAt blogId
 
 - Redis 不可用时 Outbox 进入重试；
 - Redis 恢复后事件最终变为 `SUCCESS`；
-- Worker 领取任务后宕机，超时任务能够重新领取；
+- Worker 领取任务后宕机，租约到期后任务能够被其他实例重新领取；
+- 原 Worker 在租约失效后恢复时，不能覆盖新租约持有者写入的处理结果；
 - 达到最大重试次数后变为 `FAILED`；
 - 大量粉丝使用分页和 Pipeline，不在内存中一次性加载。
 
@@ -747,6 +806,7 @@ ZADD feed:{userId} publishedAt blogId
 - Redis 短暂故障后 Feed 可以自动恢复；
 - 重复投递不会产生重复动态；
 - Outbox 状态、重试次数和失败原因可查询；
+- 过期的 `PROCESSING` 任务可以自动恢复，不会永久卡住；
 - 至少有一个 Testcontainers 故障恢复测试。
 
 ### 7.10 RabbitMQ 可靠传输扩展
@@ -962,9 +1022,10 @@ cityseek.analytics.queue     → 统计发布行为
 ```text
 src/main/resources/db/migration/
 ├─ V1__baseline.sql
-├─ V2__add_user_role.sql
-├─ V3__create_upload_file.sql
-└─ V4__create_outbox_event.sql
+├─ V2__align_shop_constraints.sql
+├─ V3__add_user_role.sql
+├─ V4__create_upload_file.sql
+└─ V5__create_outbox_event.sql
 ```
 
 注意：
@@ -1031,6 +1092,7 @@ docs: document consistency and failure recovery design
 - [ ] 数据库回滚不会提前修改 GEO；
 - [ ] Blog 与 Outbox 同时提交或同时回滚；
 - [ ] Feed 重复投递保持幂等；
+- [ ] Worker 宕机后，过期的 `PROCESSING` Outbox 能够被安全重领；
 - [ ] Outbox 最终失败可查询、可告警、可重放。
 
 ### 可观测性

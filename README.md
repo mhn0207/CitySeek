@@ -50,7 +50,9 @@ cityseek/
 ├─ web/                                   # Vue 2 + Element UI 静态页面
 │  ├─ nginx.conf.example                  # 静态资源与反向代理配置示例
 │  └─ README.md                           # 前端运行说明
-├─ docs/                                  # 压测与可靠性记录
+├─ docs/                                  # 压测记录与后续改造方案
+│  ├─ SECKILL_LOAD_TEST.md
+│  └─ PROJECT_IMPROVEMENT_PLAN.md         # 规划中，清单完成前不代表已经实现
 ├─ pom.xml
 └─ README.md
 ```
@@ -124,7 +126,7 @@ cityseek/
 - Maven 3.9+
 - MySQL 8+
 - Redis 6.2+（秒杀功能需要 Redis Stream 消费组）
-- Nginx 1.18（仅完整前端联调需要，仓库已附 Windows 版本）
+- Nginx 1.18（仅完整前端联调需要；不纳入 `cityseek-server` 源码仓库）
 
 ## 快速启动
 
@@ -193,6 +195,10 @@ $env:REDIS_PORT = "6379"
 | `IMAGE_UPLOAD_DIR` | `./data/images` | 上传图片存储目录 |
 | `REDIS_INITIALIZE_CACHE` | `true` | 启动时初始化 Redis 派生数据 |
 | `REDIS_STREAM_CONSUMER` | `cityseek-consumer` | Stream 消费者名称 |
+| `REDIS_PENDING_MIN_IDLE` | `30s` | Pending 消息允许被其他消费者接管前的最小空闲时间 |
+| `REDIS_PENDING_RECOVERY_INTERVAL` | `5s` | Pending 恢复扫描间隔 |
+| `REDIS_PENDING_BATCH_SIZE` | `20` | 每批 `XAUTOCLAIM` 接管的消息数量 |
+| `REDIS_DLQ_MAX_LENGTH` | `10000` | 秒杀订单死信 Stream 的近似最大长度 |
 | `APP_LOG_LEVEL` | `info` | `com.cityseek` 日志级别 |
 
 多实例部署时，每个实例的 `REDIS_STREAM_CONSUMER` 必须不同。
@@ -223,7 +229,8 @@ http://localhost:8080
 ```
 
 Nginx 会将 `/api/*` 去掉 `/api` 前缀后转发至 `http://127.0.0.1:8081`，并将
-`/blogs/*` 转发到后端上传图片目录。Nginx 二进制和运行日志不属于项目源码，因此不再放入仓库。
+`/blogs/*` 转发到后端上传图片目录。Nginx 二进制、运行日志和 PID 不属于
+`cityseek-server` 源码仓库；可以使用工作区中的外置 Nginx，或自行安装兼容版本。
 
 ## 登录与鉴权
 
@@ -439,3 +446,7 @@ mvn -Dtest=VoucherSeckillLoadIT -Dload.requests=500 -Dload.stock=200 -Dload.conc
 - 多实例部署时为每个 Stream 消费者配置唯一名称
 - 将启动时全量初始化改为可观测的迁移或分批任务
 - 增加指标监控、链路追踪和集中日志
+
+详细实施顺序、数据库迁移要求和验收清单见
+[`docs/PROJECT_IMPROVEMENT_PLAN.md`](docs/PROJECT_IMPROVEMENT_PLAN.md)。该文档当前是规划，
+其中未勾选的能力不应描述为已经实现。
