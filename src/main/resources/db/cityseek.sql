@@ -28,8 +28,8 @@ CREATE TABLE `tb_blog`  (
   `title` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '标题',
   `images` varchar(2048) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '探店的照片，最多9张，多张以\",\"隔开',
   `content` varchar(2048) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '探店的文字描述',
-  `liked` int(8) UNSIGNED NULL DEFAULT 00000000 COMMENT '点赞数量',
-  `comments` int(8) UNSIGNED NULL DEFAULT NULL COMMENT '评论数量',
+  `liked` int(8) UNSIGNED NOT NULL DEFAULT 0 COMMENT '点赞数量',
+  `comments` int(8) UNSIGNED NOT NULL DEFAULT 0 COMMENT '评论数量',
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
@@ -116,12 +116,12 @@ CREATE TABLE `tb_shop`  (
   `images` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '商铺图片，多个图片以\',\'隔开',
   `area` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '商圈，例如陆家嘴',
   `address` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '地址',
-  `x` double UNSIGNED NOT NULL COMMENT '经度',
-  `y` double UNSIGNED NOT NULL COMMENT '维度',
+  `x` double NOT NULL COMMENT '经度，-180～180',
+  `y` double NOT NULL COMMENT '纬度，-90～90',
   `avg_price` bigint(10) UNSIGNED NULL DEFAULT NULL COMMENT '均价，取整数',
-  `sold` int(10) UNSIGNED NOT NULL COMMENT '销量',
-  `comments` int(10) UNSIGNED NOT NULL COMMENT '评论数量',
-  `score` int(2) UNSIGNED NOT NULL COMMENT '评分，1~5分，乘10保存，避免小数',
+  `sold` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT '销量',
+  `comments` int(10) UNSIGNED NOT NULL DEFAULT 0 COMMENT '评论数量',
+  `score` int(2) UNSIGNED NOT NULL DEFAULT 0 COMMENT '评分乘10保存；0表示暂无评分，正常范围10～50',
   `open_hours` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT NULL COMMENT '营业时间，例如 10:00-22:00',
   `create_time` timestamp NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -185,6 +185,7 @@ CREATE TABLE `tb_user`  (
   `password` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT '' COMMENT '密码，加密存储',
   `nick_name` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT '' COMMENT '昵称，默认是用户id',
   `icon` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NULL DEFAULT '' COMMENT '人物头像',
+  `role` varchar(16) NOT NULL DEFAULT 'USER' COMMENT 'USER/ADMIN',
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
@@ -194,10 +195,10 @@ CREATE TABLE `tb_user`  (
 -- ----------------------------
 -- Records of tb_user
 -- ----------------------------
-INSERT INTO `tb_user` VALUES (1, '13686869696', '', '小鱼同学', '/imgs/blogs/blog1.jpg', '2021-12-24 10:27:19', '2022-01-11 16:04:00');
-INSERT INTO `tb_user` VALUES (2, '13838411438', '', '可可今天不吃肉', '/imgs/icons/kkjtbcr.jpg', '2021-12-24 15:14:39', '2021-12-28 19:58:04');
-INSERT INTO `tb_user` VALUES (4, '13456789011', '', 'user_slxaxy2au9f3tanffaxr', '', '2022-01-07 12:07:53', '2022-01-07 12:07:53');
-INSERT INTO `tb_user` VALUES (5, '13456789001', '', 'user_n0bb8mwwg4', '', '2022-01-07 16:11:33', '2022-01-07 16:11:33');
+INSERT INTO `tb_user` VALUES (1, '13686869696', '', '小鱼同学', '/imgs/blogs/blog1.jpg', 'ADMIN', '2021-12-24 10:27:19', '2022-01-11 16:04:00');
+INSERT INTO `tb_user` VALUES (2, '13838411438', '', '可可今天不吃肉', '/imgs/icons/kkjtbcr.jpg', 'USER', '2021-12-24 15:14:39', '2021-12-28 19:58:04');
+INSERT INTO `tb_user` VALUES (4, '13456789011', '', 'user_slxaxy2au9f3tanffaxr', '', 'USER', '2022-01-07 12:07:53', '2022-01-07 12:07:53');
+INSERT INTO `tb_user` VALUES (5, '13456789001', '', 'user_n0bb8mwwg4', '', 'USER', '2022-01-07 16:11:33', '2022-01-07 16:11:33');
 
 -- ----------------------------
 -- Table structure for tb_user_info
@@ -269,4 +270,44 @@ CREATE TABLE `tb_voucher_order`  (
 -- Records of tb_voucher_order
 -- ----------------------------
 
+-- ----------------------------
+-- Table structure for tb_upload_file
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_upload_file`;
+CREATE TABLE `tb_upload_file` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `path` varchar(512) NOT NULL,
+  `uploader_id` bigint UNSIGNED NOT NULL,
+  `business_type` varchar(32) NOT NULL DEFAULT 'BLOG',
+  `status` tinyint NOT NULL DEFAULT 0 COMMENT '0临时 1已绑定 2已删除',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_upload_path` (`path`),
+  KEY `idx_upload_owner` (`uploader_id`, `status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ----------------------------
+-- Table structure for tb_outbox_event
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_outbox_event`;
+CREATE TABLE `tb_outbox_event` (
+  `id` bigint NOT NULL,
+  `aggregate_type` varchar(32) NOT NULL,
+  `aggregate_id` bigint NOT NULL,
+  `event_type` varchar(64) NOT NULL,
+  `payload` varchar(2048) NOT NULL,
+  `status` varchar(16) NOT NULL DEFAULT 'PENDING',
+  `retry_count` int NOT NULL DEFAULT 0,
+  `next_retry_time` timestamp NULL DEFAULT NULL,
+  `error_message` varchar(512) NULL,
+  `claimed_by` varchar(128) NULL,
+  `claim_token` varchar(64) NULL,
+  `processing_deadline` timestamp NULL,
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_outbox_pending` (`status`, `next_retry_time`, `create_time`),
+  KEY `idx_outbox_processing` (`status`, `processing_deadline`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SET FOREIGN_KEY_CHECKS = 1;

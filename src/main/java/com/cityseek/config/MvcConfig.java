@@ -1,5 +1,6 @@
 package com.cityseek.config;
 
+import com.cityseek.security.RoleInterceptor;
 import com.cityseek.utils.LoginInterceptor;
 import com.cityseek.utils.RefreshTokenInterceptor;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,6 +26,7 @@ public class MvcConfig implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new LoginInterceptor()).addPathPatterns("/**").order(1);
+        registry.addInterceptor(new RoleInterceptor()).addPathPatterns("/**").order(2);
         registry.addInterceptor(new RefreshTokenInterceptor(stringRedisTemplate)).addPathPatterns("/**").order(0);
     }
 

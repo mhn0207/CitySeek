@@ -1,10 +1,10 @@
 package com.cityseek.controller;
 
 import com.cityseek.dto.Result;
-import com.cityseek.entity.BlogComments;
+import com.cityseek.dto.request.BlogCommentCreateRequest;
 import com.cityseek.service.IBlogCommentsService;
 import com.cityseek.utils.PublicEndpoint;
-import jakarta.annotation.Resource;
+import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -16,8 +16,11 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/blog-comments")
 public class BlogCommentsController {
 
-    @Resource
-    private IBlogCommentsService commentsService;
+    private final IBlogCommentsService commentsService;
+
+    public BlogCommentsController(IBlogCommentsService commentsService) {
+        this.commentsService = commentsService;
+    }
 
     @GetMapping("/of/blog")
     @PublicEndpoint
@@ -28,7 +31,7 @@ public class BlogCommentsController {
     }
 
     @PostMapping
-    public Result addComment(@RequestBody BlogComments comment) {
-        return commentsService.addComment(comment);
+    public Result addComment(@Valid @RequestBody BlogCommentCreateRequest request) {
+        return commentsService.addComment(request);
     }
 }

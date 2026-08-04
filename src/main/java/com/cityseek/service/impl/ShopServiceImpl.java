@@ -4,154 +4,187 @@ import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.cityseek.dto.Result;
+import com.cityseek.dto.request.ShopCreateRequest;
+import com.cityseek.dto.request.ShopUpdateRequest;
 import com.cityseek.entity.Shop;
+import com.cityseek.exception.ResourceNotFoundException;
 import com.cityseek.mapper.ShopMapper;
 import com.cityseek.service.IShopService;
+import com.cityseek.shop.ShopChangedEvent;
 import com.cityseek.utils.CacheClient;
 import com.cityseek.utils.SystemConstants;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.geo.Distance;
-import org.springframework.data.geo.Point;
-import org.springframework.data.geo.GeoResult;
-import org.springframework.data.geo.GeoResults;
 import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.domain.geo.GeoReference;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import jakarta.annotation.Resource;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import static com.cityseek.utils.RedisConstants.*;
+import static com.cityseek.utils.RedisConstants.CACHE_SHOP_KEY;
+import static com.cityseek.utils.RedisConstants.CACHE_SHOP_TTL;
+import static com.cityseek.utils.RedisConstants.SHOP_GEO_KEY;
 
-/**
- * <p>
- *  服务实现类
- * </p>
- *
- * @since 2021-12-22
- */
 @Service
 public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IShopService {
 
+    private final StringRedisTemplate redisTemplate;
+    private final CacheClient cacheClient;
+    private final ApplicationEventPublisher eventPublisher;
 
-    @Resource
-    private StringRedisTemplate stringRedisTemplate;
-
-    @Resource
-    private CacheClient cacheClient;
-
-    @Override
-    public Result queryById(Long id) {
-        // 解决缓存穿透
-        Shop shop = cacheClient
-                .queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
-
-        // 互斥锁解决缓存击穿
-        // Shop shop = cacheClient
-        //         .queryWithMutex(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
-
-        // 逻辑过期解决缓存击穿
-        // Shop shop = cacheClient
-        //         .queryWithLogicalExpire(CACHE_SHOP_KEY, id, Shop.class, this::getById, 20L, TimeUnit.SECONDS);
-
-        if (shop == null) {
-            return Result.fail("店铺不存在！");
-        }
-        // 7.返回
-        return Result.ok(shop);
+    public ShopServiceImpl(
+            StringRedisTemplate redisTemplate,
+            CacheClient cacheClient,
+            ApplicationEventPublisher eventPublisher) {
+        this.redisTemplate = redisTemplate;
+        this.cacheClient = cacheClient;
+        this.eventPublisher = eventPublisher;
     }
 
     @Override
-    public Result create(Shop shop) {
-        if (shop == null || shop.getTypeId() == null || shop.getName() == null || shop.getName().isBlank()) {
-            return Result.fail("店铺参数不合法");
-        }
+    public Result queryById(Long id) {
+        Shop shop = cacheClient.queryWithPassThrough(
+                CACHE_SHOP_KEY, id, Shop.class, this::getById,
+                CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        return shop == null ? Result.fail("店铺不存在！") : Result.ok(shop);
+    }
+
+    @Override
+    @Transactional
+    public Result create(ShopCreateRequest request) {
+        Shop shop = new Shop()
+                .setName(request.getName().trim())
+                .setTypeId(request.getTypeId())
+                .setImages(request.getImages().trim())
+                .setArea(trimToNull(request.getArea()))
+                .setAddress(request.getAddress().trim())
+                .setX(request.getX())
+                .setY(request.getY())
+                .setAvgPrice(request.getAvgPrice())
+                .setOpenHours(trimToNull(request.getOpenHours()))
+                .setSold(0)
+                .setComments(0)
+                .setScore(0);
         if (!save(shop)) {
             throw new IllegalStateException("店铺保存失败");
         }
-        if (shop.getX() != null && shop.getY() != null) {
-            stringRedisTemplate.opsForGeo().add(
-                    SHOP_GEO_KEY + shop.getTypeId(),
-                    new Point(shop.getX(), shop.getY()),
-                    shop.getId().toString());
-        }
+        eventPublisher.publishEvent(new ShopChangedEvent(null, copyShop(shop)));
         return Result.ok(shop.getId());
     }
 
     @Override
-    public Result update(Shop shop) {
-        if (shop == null) {
-            return Result.fail("店铺参数不能为空");
+    @Transactional
+    public Result update(ShopUpdateRequest request) {
+        Shop before = getById(request.getId());
+        if (before == null) {
+            throw new ResourceNotFoundException("店铺不存在");
         }
-        Long id = shop.getId();
-        if (id == null) {
-            return Result.fail("店铺id不能为空");
+        Shop patch = new Shop().setId(request.getId());
+        if (request.getName() != null) {
+            patch.setName(request.getName().trim());
         }
-        if (!updateById(shop)) {
-            return Result.fail("店铺不存在或更新失败");
+        if (request.getTypeId() != null) {
+            patch.setTypeId(request.getTypeId());
         }
-        stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
-        Shop fresh = getById(id);
-        if (fresh != null && fresh.getTypeId() != null && fresh.getX() != null && fresh.getY() != null) {
-            stringRedisTemplate.opsForGeo().add(
-                    SHOP_GEO_KEY + fresh.getTypeId(), new Point(fresh.getX(), fresh.getY()), id.toString());
+        if (request.getImages() != null) {
+            patch.setImages(request.getImages().trim());
         }
+        if (request.getArea() != null) {
+            patch.setArea(request.getArea().trim());
+        }
+        if (request.getAddress() != null) {
+            patch.setAddress(request.getAddress().trim());
+        }
+        if (request.getX() != null) {
+            patch.setX(request.getX());
+        }
+        if (request.getY() != null) {
+            patch.setY(request.getY());
+        }
+        if (request.getAvgPrice() != null) {
+            patch.setAvgPrice(request.getAvgPrice());
+        }
+        if (request.getOpenHours() != null) {
+            patch.setOpenHours(request.getOpenHours().trim());
+        }
+        if (!updateById(patch)) {
+            throw new IllegalStateException("店铺更新失败");
+        }
+        Shop after = getById(request.getId());
+        if (after == null) {
+            throw new IllegalStateException("店铺更新后无法读取");
+        }
+        eventPublisher.publishEvent(new ShopChangedEvent(copyShop(before), copyShop(after)));
         return Result.ok();
     }
 
     @Override
     public Result queryShopByType(Integer typeId, Integer current, Double x, Double y) {
-        // 1.判断是否需要根据坐标查询
+        if (typeId == null || current == null || current < 1) {
+            return Result.fail("分页参数不合法");
+        }
         if (x == null || y == null) {
-            // 不需要坐标查询，按数据库查询
-            Page<Shop> page = query()
-                    .eq("type_id", typeId)
+            Page<Shop> page = query().eq("type_id", typeId)
                     .page(new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE));
-            // 返回数据
             return Result.ok(page.getRecords());
         }
 
-        // 2.计算分页参数
         int from = (current - 1) * SystemConstants.DEFAULT_PAGE_SIZE;
         int end = current * SystemConstants.DEFAULT_PAGE_SIZE;
+        var results = redisTemplate.opsForGeo().search(
+                SHOP_GEO_KEY + typeId,
+                GeoReference.fromCoordinate(x, y),
+                new Distance(5000),
+                RedisGeoCommands.GeoSearchCommandArgs.newGeoSearchArgs().includeDistance().limit(end));
+        if (results == null || results.getContent().size() <= from) {
+            return Result.ok(Collections.emptyList());
+        }
 
-        // 3.查询redis、按照距离排序、分页。结果：shopId、distance
-        String key = SHOP_GEO_KEY + typeId;
-        GeoResults<RedisGeoCommands.GeoLocation<String>> results = stringRedisTemplate.opsForGeo() // GEOSEARCH key BYLONLAT x y BYRADIUS 10 WITHDISTANCE
-                .search(
-                        key,
-                        GeoReference.fromCoordinate(x, y),
-                        new Distance(5000),
-                        RedisGeoCommands.GeoSearchCommandArgs.newGeoSearchArgs().includeDistance().limit(end)
-                );
-        // 4.解析出id
-        if (results == null) {
-            return Result.ok(Collections.emptyList());
-        }
-        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> list = results.getContent();
-        if (list.size() <= from) {
-            // 没有下一页了，结束
-            return Result.ok(Collections.emptyList());
-        }
-        // 4.1.截取 from ~ end的部分
-        List<Long> ids = new ArrayList<>(list.size());
-        Map<String, Distance> distanceMap = new HashMap<>(list.size());
-        list.stream().skip(from).forEach(result -> {
-            // 4.2.获取店铺id
-            String shopIdStr = result.getContent().getName();
-            ids.add(Long.valueOf(shopIdStr));
-            // 4.3.获取距离
-            Distance distance = result.getDistance();
-            distanceMap.put(shopIdStr, distance);
+        List<Long> ids = new ArrayList<>();
+        Map<String, Distance> distanceMap = new HashMap<>();
+        results.getContent().stream().skip(from).forEach(result -> {
+            String shopId = result.getContent().getName();
+            ids.add(Long.valueOf(shopId));
+            distanceMap.put(shopId, result.getDistance());
         });
-        // 5.根据id查询Shop
-        String idStr = StrUtil.join(",", ids);
-        List<Shop> shops = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
-        for (Shop shop : shops) {
-            shop.setDistance(distanceMap.get(shop.getId().toString()).getValue());
-        }
-        // 6.返回
+        String idList = StrUtil.join(",", ids);
+        List<Shop> shops = query().in("id", ids)
+                .last("ORDER BY FIELD(id," + idList + ")").list();
+        shops.forEach(shop -> shop.setDistance(distanceMap.get(shop.getId().toString()).getValue()));
         return Result.ok(shops);
+    }
+
+    private Shop copyShop(Shop source) {
+        return new Shop()
+                .setId(source.getId())
+                .setName(source.getName())
+                .setTypeId(source.getTypeId())
+                .setImages(source.getImages())
+                .setArea(source.getArea())
+                .setAddress(source.getAddress())
+                .setX(source.getX())
+                .setY(source.getY())
+                .setAvgPrice(source.getAvgPrice())
+                .setSold(source.getSold())
+                .setComments(source.getComments())
+                .setScore(source.getScore())
+                .setOpenHours(source.getOpenHours())
+                .setCreateTime(source.getCreateTime())
+                .setUpdateTime(source.getUpdateTime());
+    }
+
+    private String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }

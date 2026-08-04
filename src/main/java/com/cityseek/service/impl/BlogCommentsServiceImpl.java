@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.cityseek.dto.Result;
 import com.cityseek.dto.UserDTO;
+import com.cityseek.dto.request.BlogCommentCreateRequest;
 import com.cityseek.entity.BlogComments;
 import com.cityseek.entity.User;
 import com.cityseek.mapper.BlogCommentsMapper;
@@ -60,21 +61,19 @@ public class BlogCommentsServiceImpl extends ServiceImpl<BlogCommentsMapper, Blo
 
     @Override
     @Transactional
-    public Result addComment(BlogComments comment) {
+    public Result addComment(BlogCommentCreateRequest request) {
         UserDTO currentUser = UserHolder.getUser();
-        if (comment == null || comment.getBlogId() == null
-                || comment.getContent() == null || comment.getContent().isBlank()) {
-            return Result.fail("评论内容不能为空");
-        }
-        if (blogService.getById(comment.getBlogId()) == null) {
+        if (blogService.getById(request.getBlogId()) == null) {
             return Result.fail("笔记不存在");
         }
-        comment.setId(null);
-        comment.setUserId(currentUser.getId());
-        comment.setParentId(comment.getParentId() == null ? 0L : comment.getParentId());
-        comment.setAnswerId(comment.getAnswerId() == null ? 0L : comment.getAnswerId());
-        comment.setLiked(0);
-        comment.setStatus(0);
+        BlogComments comment = new BlogComments()
+                .setUserId(currentUser.getId())
+                .setBlogId(request.getBlogId())
+                .setParentId(request.getParentId() == null ? 0L : request.getParentId())
+                .setAnswerId(request.getAnswerId() == null ? 0L : request.getAnswerId())
+                .setContent(request.getContent().trim())
+                .setLiked(0)
+                .setStatus(0);
         if (!save(comment)) {
             throw new IllegalStateException("评论保存失败");
         }

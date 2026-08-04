@@ -9,7 +9,10 @@
 - 将接口鉴权改为默认保护、显式公开，增加验证码频控与 Lua 原子消费、Token 续期、退出登录和用户资料更新；
 - 重构秒杀下单链路，增加订单受理状态、`XAUTOCLAIM` Pending 接管、幂等消费、有限重试、Lua 原子补偿和有界死信队列；
 - 增加数据库唯一索引、条件扣库存以及真实 MySQL/Redis Testcontainers 可靠性测试和可调参数 HTTP 压测；
-- 补充统一异常处理、输入校验、上传路径规范化，以及完整的架构、接口、Redis Key 和测试文档。
+- 写接口使用显式请求 DTO 与 Jakarta Validation，商铺/优惠券管理使用简单 RBAC，图片上传记录所有权和绑定状态；
+- 商铺更新通过事务提交后事件同步 Redis GEO，并提供管理员 GEO 全量对账入口；
+- 笔记发布使用 MySQL 事务 Outbox，后台通过租约、fencing token、分页和 Redis Pipeline 幂等投递 Feed；
+- Actuator/Prometheus 暴露秒杀、Stream Pending/DLQ/lag 和 Feed Outbox 指标，健康检查提供积压阈值。
 
 项目重点展示并发一致性、故障恢复、可测试性和工程交付能力。
 
@@ -23,6 +26,9 @@ flowchart LR
     App --> MySQL[("MySQL 8")]
     App --> Redis[("Redis 6.2+")]
     App --> Uploads["本地图片目录"]
+    App --> Outbox[("MySQL Outbox")]
+    Outbox --> Worker["Feed Outbox Worker"]
+    Worker --> Redis
     App --> Redisson["Redisson 分布式锁"]
     Redisson --> Redis
 ```
@@ -37,10 +43,14 @@ cityseek/
 │  ├─ service/impl/                      # 核心业务实现
 │  ├─ mapper/                            # MyBatis-Plus Mapper
 │  ├─ entity/                            # 数据库实体
-│  ├─ dto/                               # 请求和响应模型
+│  ├─ dto/request/                       # 经过校验的写接口请求模型
+│  ├─ feed/                              # Outbox Worker 与 Feed 投递
+│  ├─ metrics/                           # 秒杀和 Redis Stream 指标
+│  ├─ security/                          # 简单 RBAC
 │  └─ utils/                             # 缓存、锁、ID、拦截器等工具
 ├─ src/main/resources/
-│  ├─ db/cityseek.sql                    # 数据库结构与演示数据
+│  ├─ db/cityseek.sql                    # 新环境完整数据库结构与演示数据
+│  ├─ db/migration/                      # 已有环境增量升级脚本
 │  ├─ mapper/VoucherMapper.xml
 │  ├─ login-code-consume.lua
 │  ├─ seckill.lua
@@ -52,7 +62,7 @@ cityseek/
 │  └─ README.md                           # 前端运行说明
 ├─ docs/                                  # 压测记录与后续改造方案
 │  ├─ SECKILL_LOAD_TEST.md
-│  └─ PROJECT_IMPROVEMENT_PLAN.md         # 规划中，清单完成前不代表已经实现
+│  └─ PROJECT_IMPROVEMENT_PLAN.md         # 本轮实现与验收状态
 ├─ pom.xml
 └─ README.md
 ```
@@ -67,6 +77,7 @@ cityseek/
 - Redisson 3.40.2
 - Lua
 - Hutool、Lombok、Jakarta Validation
+- Spring Boot Actuator、Micrometer、Prometheus
 - Vue 2、Element UI、Axios、Nginx
 - JUnit 5、Mockito
 
@@ -83,10 +94,11 @@ cityseek/
 ### 商铺与缓存
 
 - 商铺详情、类型和名称查询
-- 商铺新增、更新及缓存失效
+- 管理员新增、更新商铺；数据库提交后再失效缓存并同步 GEO
 - 缓存空值解决缓存穿透
 - `CacheClient` 同时提供互斥锁和逻辑过期两种缓存击穿处理方案
 - Redis GEO 查询 5 公里内商铺并按距离分页
+- 类型/坐标变更会删除旧 GEO 成员，并支持管理员 Pipeline 全量对账
 
 当前商铺详情接口实际启用的是缓存穿透方案；互斥锁和逻辑过期实现保留在 `CacheClient` 中，可按业务需要切换。
 
@@ -95,7 +107,9 @@ cityseek/
 - 发布、查询和点赞探店笔记
 - Redis ZSet 维护点赞用户及点赞时间
 - 关注、取消关注和共同关注
-- 发布笔记时推送到粉丝 Feed
+- 发布笔记时在同一 MySQL 事务写 Blog 与 Outbox，异步推送到粉丝 Feed
+- Outbox Worker 使用短租约、claim token、失败退避和最终失败重放
+- Feed 使用 blogId 作为 ZSet member，重复投递幂等
 - 基于时间戳与偏移量的 Feed 滚动分页
 - 笔记评论查询与发布
 
@@ -114,11 +128,14 @@ cityseek/
 
 ### 图片上传
 
-- 支持 `jpg`、`jpeg`、`png`、`webp`、`gif`
+- 支持 jpg、jpeg、png、webp、gif，同时校验后缀、MIME 和图片内容
+- 上传元数据记录所有者以及 TEMPORARY/BOUND/DELETED 状态
 - 单次上传和请求最大 5 MB
 - UUID 分目录存储
 - 路径规范化校验，避免目录穿越
-- 后端通过 `/blogs/**` 直接暴露上传图片
+- 普通用户只能删除自己的临时图片，管理员可管理全部图片
+- 发布笔记时校验图片归属并原子标记为已绑定
+- 后端通过 /blogs/** 直接暴露上传图片
 
 ## 环境要求
 
@@ -144,6 +161,16 @@ CREATE DATABASE cityseek
 mysql -u root -p cityseek < src/main/resources/db/cityseek.sql
 ```
 
+已有数据库不要重新导入完整脚本。备份后按顺序执行 `src/main/resources/db/migration/` 中的
+`V2`～`V5`；这些文件是显式升级脚本，项目当前未启用 Flyway 自动执行。升级脚本不会自动授予
+管理员角色，需审计后手工执行：
+
+```sql
+UPDATE tb_user SET role = 'ADMIN' WHERE id = <trusted_user_id>;
+```
+
+新环境的演示数据已将用户 1 标记为管理员。角色变更后需要重新登录，使 Redis Token Hash 获取最新角色。
+
 脚本会创建以下数据表：
 
 | 表 | 用途 |
@@ -158,6 +185,8 @@ mysql -u root -p cityseek < src/main/resources/db/cityseek.sql
 | `tb_voucher` | 优惠券 |
 | `tb_seckill_voucher` | 秒杀库存和时间 |
 | `tb_voucher_order` | 优惠券订单 |
+| `tb_upload_file` | 上传文件所有权和绑定状态 |
+| `tb_outbox_event` | Feed 可靠投递 Outbox |
 
 ### 2. 启动 Redis
 
@@ -199,9 +228,17 @@ $env:REDIS_PORT = "6379"
 | `REDIS_PENDING_RECOVERY_INTERVAL` | `5s` | Pending 恢复扫描间隔 |
 | `REDIS_PENDING_BATCH_SIZE` | `20` | 每批 `XAUTOCLAIM` 接管的消息数量 |
 | `REDIS_DLQ_MAX_LENGTH` | `10000` | 秒杀订单死信 Stream 的近似最大长度 |
+| `REDIS_STREAM_METRICS_INTERVAL` | `10s` | Stream 状态采集周期 |
+| `REDIS_PENDING_WARNING_AGE` | `60s` | 最老 Pending 健康告警阈值 |
+| `FEED_OUTBOX_ENABLED` | `true` | 是否启用 Feed Outbox Worker |
+| `FEED_OUTBOX_POLL_INTERVAL` | `1000` | Outbox 拉取间隔（毫秒） |
+| `FEED_OUTBOX_BATCH_SIZE` | `10` | 每次领取的事件数 |
+| `FEED_FOLLOWER_BATCH_SIZE` | `200` | 粉丝分页/Pipeline 批大小 |
+| `FEED_OUTBOX_LEASE_DURATION` | `30s` | Outbox 处理租约 |
+| `FEED_OUTBOX_MAX_RETRIES` | `5` | Outbox 最大重试次数 |
 | `APP_LOG_LEVEL` | `info` | `com.cityseek` 日志级别 |
 
-多实例部署时，每个实例的 `REDIS_STREAM_CONSUMER` 必须不同。
+多实例部署时，每个实例的 `REDIS_STREAM_CONSUMER` 必须不同。Outbox Worker 会自动生成实例标识，并依靠唯一 `claim_token` 防止过期 Worker 覆盖新租约持有者。
 
 ### 4. 启动后端
 
@@ -268,7 +305,7 @@ Authorization: Bearer <token>
 
 为兼容当前静态前端，也支持直接把 Token 放入 `Authorization` 请求头。
 
-未标记 `@PublicEndpoint` 的控制器方法默认需要登录。用户会话存储在 Redis Hash 中，默认有效期为 30 分钟，每次有效访问会刷新过期时间。
+未标记 `@PublicEndpoint` 的控制器方法默认需要登录；商铺、优惠券、GEO 对账和 Outbox 管理还要求 `ADMIN` 角色。用户会话存储在 Redis Hash 中，默认有效期为 30 分钟，每次有效访问会刷新过期时间。
 
 ## 统一响应
 
@@ -317,12 +354,13 @@ Authorization: Bearer <token>
 | GET | `/shop/{id}` | 公开 | 商铺详情 |
 | GET | `/shop/of/type` | 公开 | 按类型或坐标分页查询 |
 | GET | `/shop/of/name` | 公开 | 按名称查询 |
-| POST | `/shop` | 登录 | 新增商铺 |
-| PUT | `/shop` | 登录 | 更新商铺 |
+| POST | `/shop` | 管理员 | 新增商铺 |
+| PUT | `/shop` | 管理员 | 更新商铺 |
+| POST | `/shop/geo/reconcile` | 管理员 | 重建全部商铺 GEO |
 | GET | `/shop-type/list` | 公开 | 商铺类型列表 |
 | GET | `/voucher/list/{shopId}` | 公开 | 商铺优惠券 |
-| POST | `/voucher` | 登录 | 新增普通券 |
-| POST | `/voucher/seckill` | 登录 | 新增秒杀券 |
+| POST | `/voucher` | 管理员 | 新增普通券 |
+| POST | `/voucher/seckill` | 管理员 | 新增秒杀券 |
 | POST | `/voucher-order/seckill/{id}` | 登录 | 秒杀下单 |
 | GET | `/voucher-order/status/{id}` | 登录 | 查询当前用户的订单处理状态 |
 
@@ -352,6 +390,8 @@ Authorization: Bearer <token>
 | DELETE | `/upload/blog?name=...` | 登录 | 删除上传图片 |
 | GET | `/blogs/**` | 公开静态资源 | 访问上传图片 |
 
+管理员可靠性接口：`GET /admin/outbox?status=FAILED` 查询最近 100 条事件，`POST /admin/outbox/{id}/replay` 重放最终失败事件。
+
 ## Redis 数据设计
 
 | Key | 类型 | 用途 |
@@ -374,7 +414,7 @@ Authorization: Bearer <token>
 | `stream.orders` | Stream | 秒杀订单消息，不自动裁剪 Pending |
 | `stream.orders.dlq` | Stream | 有界订单死信消息 |
 
-应用启动时，`RedisDataInitializer` 会从数据库初始化 GEO、关注关系、秒杀时间、缺失的秒杀库存以及历史下单用户集合。秒杀库存使用 `setIfAbsent`，因此 Redis 已有库存时不会被数据库值覆盖。
+应用启动时，`RedisDataInitializer` 会初始化关注关系、秒杀时间、缺失的秒杀库存以及历史下单用户集合。GEO 不再在启动线程逐条全量写入；首次部署或需要修复时由管理员调用 `/shop/geo/reconcile` 分页并通过 Pipeline 重建。秒杀库存使用 `setIfAbsent`，因此 Redis 已有库存时不会被数据库值覆盖。
 
 ## 秒杀处理流程
 
@@ -413,6 +453,34 @@ sequenceDiagram
 8. 补偿脚本按订单状态幂等执行；若数据库订单已经存在，则直接修正为 `SUCCESS`，不会错误回补库存。
 9. DLQ 使用近似 `MAXLEN`，订单状态使用 TTL；主 Stream 需监控长度并基于 Pending/ACK 水位安全清理。
 
+## Feed Outbox 处理流程
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant B as Blog Service
+    participant M as MySQL
+    participant W as Outbox Worker
+    participant R as Redis Feed
+
+    C->>B: 发布笔记
+    B->>M: 同一事务保存 Blog + Outbox
+    M-->>B: Commit
+    B-->>C: 返回 blogId
+    W->>M: SKIP LOCKED 领取事件和租约
+    W->>M: 分页查询粉丝
+    W->>R: Pipeline ZADD feed:userId publishedAt blogId
+    W->>M: claim_token 条件标记 SUCCESS
+```
+
+Worker 网络投递期间不持有数据库锁。`PROCESSING` 租约过期后可由其他实例重领；完成、续租和失败更新都带本次 `claim_token`。Redis 写入使用 blogId 作为 member，因此部分成功、Worker 宕机或整条事件重复执行都不会生成重复动态。重试达到上限后事件进入 `FAILED`，管理员可以查询并重放。
+
+Prometheus 端点 `/actuator/prometheus` 仅允许管理员访问。核心指标包括：
+
+- `cityseek_seckill_requests_total`、`cityseek_seckill_accepted_total`、`cityseek_seckill_rejected_total`；
+- `cityseek_order_persisted_total`、`cityseek_order_retry_total`、`cityseek_order_compensated_total`、`cityseek_order_dlq_total`；
+- `cityseek_redis_stream_length`、`cityseek_redis_stream_pending`、`cityseek_redis_stream_pending_oldest_seconds`、`cityseek_redis_stream_consumer_lag`；
+- `cityseek_feed_outbox_delivered_total`、`cityseek_feed_outbox_retry_total`、`cityseek_feed_outbox_failed_total`。
 ## 测试
 
 执行单元测试和真实依赖可靠性测试：
@@ -421,7 +489,7 @@ sequenceDiagram
 mvn test
 ```
 
-其中 `VoucherOrderReliabilityIntegrationTest` 使用 Testcontainers 启动 MySQL 8.0.36 和 Redis 7.2，验证 `XAUTOCLAIM` 接管、并发不超卖以及失败后的 DLQ 补偿。Docker 不可用时容器测试会跳过，测试报告中的 `Skipped` 应作为验收条件检查。
+容器测试使用 Testcontainers 启动 MySQL 8.0.36 和 Redis 7.2。除 `VoucherOrderReliabilityIntegrationTest` 外，还覆盖管理员授权、图片所有权、GEO 类型迁移、Feed Outbox 幂等投递和过期租约 fencing。Docker 不可用时容器测试会跳过，测试报告中的 `Skipped` 应作为验收条件检查。
 
 单独执行可靠性测试：
 
@@ -440,13 +508,11 @@ mvn -Dtest=VoucherSeckillLoadIT -Dload.requests=500 -Dload.stock=200 -Dload.conc
 ## 生产化建议
 
 - 接入真实短信服务以及发送频控、审计和告警
-- 为商铺、优惠券新增等写接口增加管理员权限
 - 继续增加 Redis/MySQL 断连、进程强制终止和 Nginx 端到端故障测试
-- 增加 Pending、消费延迟、重试和 DLQ 指标监控与告警，并提供受审计的人工重放入口
 - 多实例部署时为每个 Stream 消费者配置唯一名称
 - 将启动时全量初始化改为可观测的迁移或分批任务
-- 增加指标监控、链路追踪和集中日志
+- 为 Prometheus 指标接入正式告警规则，并增加链路追踪和集中日志
+- 如确有多消费者解耦需求，再按改造方案增加 RabbitMQ Feed 传输层
 
 详细实施顺序、数据库迁移要求和验收清单见
-[`docs/PROJECT_IMPROVEMENT_PLAN.md`](docs/PROJECT_IMPROVEMENT_PLAN.md)。该文档当前是规划，
-其中未勾选的能力不应描述为已经实现。
+[`docs/PROJECT_IMPROVEMENT_PLAN.md`](docs/PROJECT_IMPROVEMENT_PLAN.md)。该文档记录了本轮实现和验收状态；未勾选项表示当前环境仍未完成真实依赖验收。

@@ -7,20 +7,26 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.cityseek.dto.Result;
 import com.cityseek.dto.ScrollResult;
 import com.cityseek.dto.UserDTO;
+import com.cityseek.dto.request.BlogCreateRequest;
 import com.cityseek.entity.Blog;
-import com.cityseek.entity.Follow;
 import com.cityseek.entity.User;
+import com.cityseek.exception.ResourceNotFoundException;
 import com.cityseek.mapper.BlogMapper;
 import com.cityseek.service.IBlogService;
-import com.cityseek.service.IFollowService;
+import com.cityseek.service.IShopService;
 import com.cityseek.service.IUserService;
+import com.cityseek.service.OutboxEventService;
+import com.cityseek.service.UploadFileService;
 import com.cityseek.utils.SystemConstants;
 import com.cityseek.utils.UserHolder;
 import jakarta.annotation.Resource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -29,6 +35,7 @@ import java.util.Set;
 import static com.cityseek.utils.RedisConstants.BLOG_LIKED_KEY;
 import static com.cityseek.utils.RedisConstants.FEED_KEY;
 
+@Slf4j
 @Service
 public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IBlogService {
 
@@ -38,9 +45,13 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     @Resource
     private IUserService userService;
     @Resource
+    private IShopService shopService;
+    @Resource
     private StringRedisTemplate stringRedisTemplate;
     @Resource
-    private IFollowService followService;
+    private UploadFileService uploadFileService;
+    @Resource
+    private OutboxEventService outboxEventService;
 
     @Override
     public Result queryHotBlog(Integer current) {
@@ -105,22 +116,28 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     }
 
     @Override
-    public Result saveBlog(Blog blog) {
-        if (blog == null || blog.getShopId() == null
-                || StrUtil.isBlank(blog.getTitle()) || StrUtil.isBlank(blog.getContent())) {
-            return Result.fail("商铺、标题和内容不能为空");
-        }
+    @Transactional
+    public Result saveBlog(BlogCreateRequest request) {
         UserDTO user = UserHolder.getUser();
-        blog.setUserId(user.getId());
+        if (shopService.getById(request.getShopId()) == null) {
+            throw new ResourceNotFoundException("商铺不存在");
+        }
+        uploadFileService.bindBlogImages(request.getImages(), user.getId());
+        LocalDateTime now = LocalDateTime.now();
+        Blog blog = new Blog()
+                .setShopId(request.getShopId())
+                .setUserId(user.getId())
+                .setTitle(request.getTitle().trim())
+                .setImages(request.getImages().trim())
+                .setContent(request.getContent().trim())
+                .setLiked(0)
+                .setComments(0)
+                .setCreateTime(now)
+                .setUpdateTime(now);
         if (!save(blog)) {
-            return Result.fail("新增笔记失败");
+            throw new IllegalStateException("新增笔记失败");
         }
-        List<Follow> followers = followService.query().eq("follow_user_id", user.getId()).list();
-        long now = System.currentTimeMillis();
-        for (Follow follower : followers) {
-            stringRedisTemplate.opsForZSet().add(
-                    FEED_KEY + follower.getUserId(), blog.getId().toString(), now);
-        }
+        outboxEventService.createBlogPublishedEvent(blog, System.currentTimeMillis());
         return Result.ok(blog.getId());
     }
 
@@ -163,7 +180,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             try {
                 ids.add(Long.valueOf(tuple.getValue()));
             } catch (NumberFormatException exception) {
-                log.warn("Ignoring invalid blog id in feed: " + tuple.getValue());
+                log.warn("Ignoring invalid blog id in feed: {}", tuple.getValue());
             }
         }
 
@@ -190,26 +207,18 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     }
 
     private void enrichBlog(Blog blog) {
-        queryBlogUser(blog);
-        isBlogLiked(blog);
-    }
-
-    private void isBlogLiked(Blog blog) {
-        UserDTO currentUser = UserHolder.getUser();
-        if (currentUser == null) {
-            blog.setIsLike(false);
-            return;
-        }
-        Double score = stringRedisTemplate.opsForZSet()
-                .score(BLOG_LIKED_KEY + blog.getId(), currentUser.getId().toString());
-        blog.setIsLike(score != null);
-    }
-
-    private void queryBlogUser(Blog blog) {
         User user = userService.getById(blog.getUserId());
         if (user != null) {
             blog.setName(user.getNickName());
             blog.setIcon(user.getIcon());
+        }
+        UserDTO currentUser = UserHolder.getUser();
+        if (currentUser == null) {
+            blog.setIsLike(false);
+        } else {
+            Double score = stringRedisTemplate.opsForZSet()
+                    .score(BLOG_LIKED_KEY + blog.getId(), currentUser.getId().toString());
+            blog.setIsLike(score != null);
         }
     }
 }

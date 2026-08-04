@@ -6,6 +6,7 @@ import com.cityseek.dto.Result;
 import com.cityseek.dto.VoucherOrderStatusDTO;
 import com.cityseek.entity.VoucherOrder;
 import com.cityseek.mapper.VoucherOrderMapper;
+import com.cityseek.metrics.VoucherOrderMetrics;
 import com.cityseek.service.ISeckillVoucherService;
 import com.cityseek.service.IVoucherOrderService;
 import com.cityseek.utils.RedisIdWorker;
@@ -86,6 +87,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private RedisStreamPendingClaimer pendingClaimer;
 
+    @Resource
+    private VoucherOrderMetrics metrics;
+
     @Value("${app.redis.stream-consumer:cityseek-consumer}")
     private String consumerName;
 
@@ -123,7 +127,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Override
     public Result seckillVoucher(Long voucherId) {
+        metrics.request();
         if (voucherId == null) {
+            metrics.rejected("not_found");
             return Result.fail("优惠券不存在");
         }
         Long userId = UserHolder.getUser().getId();
@@ -139,15 +145,22 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             throw new IllegalStateException("秒杀服务暂不可用");
         }
         return switch (result.intValue()) {
-            case 0 -> Result.ok(orderId);
-            case 1 -> Result.fail("库存不足");
-            case 2 -> Result.fail("不能重复下单");
-            case 3 -> Result.fail("秒杀尚未开始");
-            case 4 -> Result.fail("秒杀已经结束");
-            default -> Result.fail("优惠券不存在");
+            case 0 -> {
+                metrics.accepted();
+                yield Result.ok(orderId);
+            }
+            case 1 -> rejected("out_of_stock", "库存不足");
+            case 2 -> rejected("duplicate", "不能重复下单");
+            case 3 -> rejected("not_started", "秒杀尚未开始");
+            case 4 -> rejected("ended", "秒杀已经结束");
+            default -> rejected("not_found", "优惠券不存在");
         };
     }
 
+    private Result rejected(String reason, String message) {
+        metrics.rejected(reason);
+        return Result.fail(message);
+    }
     @Override
     public Result queryOrderStatus(Long orderId) {
         if (orderId == null || orderId <= 0) {
@@ -262,6 +275,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     private void processRecord(MapRecord<String, Object, Object> record) {
+        var sample = metrics.startProcessing();
         String retryKey = RETRY_KEY_PREFIX + record.getId().getValue();
         VoucherOrder order = null;
         try {
@@ -273,14 +287,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             stringRedisTemplate.delete(retryKey);
         } catch (RuntimeException exception) {
             handleProcessingFailure(record, order, retryKey, exception);
+        } finally {
+            metrics.stopProcessing(sample);
         }
     }
-
     private void handleProcessingFailure(
             MapRecord<String, Object, Object> record,
             VoucherOrder order,
             String retryKey,
             RuntimeException originalException) {
+        metrics.retry();
         Long retryCount = stringRedisTemplate.opsForValue().increment(retryKey);
         stringRedisTemplate.expire(retryKey, 10, TimeUnit.MINUTES);
         if (retryCount == null || retryCount < MAX_RETRY_COUNT) {
@@ -289,6 +305,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         if (!hasCompleteIdentity(order)) {
             moveMalformedMessageToDeadLetter(record, originalException);
+            metrics.deadLetter();
             acknowledge(record);
             stringRedisTemplate.delete(retryKey);
             return;
@@ -324,6 +341,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             if (compensationResult == null) {
                 throw new IllegalStateException("Failed to compensate voucher order", originalException);
             }
+            metrics.compensated();
+            metrics.deadLetter();
             acknowledge(record);
             stringRedisTemplate.delete(retryKey);
             log.error(
@@ -344,6 +363,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             throw new IllegalStateException("订单正在处理中");
         }
         try {
+            boolean[] created = {false};
             VoucherOrder persisted = transactionTemplate.execute(status -> {
                 VoucherOrder existing = findPersistedOrder(order);
                 if (existing != null) {
@@ -359,10 +379,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 if (!save(order)) {
                     throw new IllegalStateException("订单保存失败");
                 }
+                created[0] = true;
                 return order;
             });
             if (persisted == null) {
                 throw new IllegalStateException("订单事务未返回结果");
+            }
+            if (created[0]) {
+                metrics.persisted();
             }
             return persisted;
         } finally {
@@ -371,7 +395,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             }
         }
     }
-
     private VoucherOrder findPersistedOrder(VoucherOrder order) {
         if (order == null) {
             return null;

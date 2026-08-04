@@ -38,6 +38,9 @@ public abstract class ContainerIntegrationTest {
         registry.add("app.redis.pending-batch-size", () -> "20");
         registry.add("app.redis.stream-max-length", () -> "10000");
         registry.add("app.redis.dlq-max-length", () -> "1000");
+        registry.add("app.redis.stream-metrics-interval", () -> "60s");
+        registry.add("app.feed.outbox.poll-interval", () -> "100");
+        registry.add("app.upload-dir", () -> "target/test-uploads");
         registry.add("logging.level.com.cityseek", () -> "warn");
     }
 }

@@ -1,19 +1,16 @@
 package com.cityseek.service;
 
-import com.cityseek.dto.Result;
-import com.cityseek.entity.Voucher;
 import com.baomidou.mybatisplus.extension.service.IService;
+import com.cityseek.dto.Result;
+import com.cityseek.dto.request.SeckillVoucherCreateRequest;
+import com.cityseek.dto.request.VoucherCreateRequest;
+import com.cityseek.entity.Voucher;
 
-/**
- * <p>
- *  服务类
- * </p>
- *
- * @since 2021-12-22
- */
 public interface IVoucherService extends IService<Voucher> {
 
     Result queryVoucherOfShop(Long shopId);
 
-    void addSeckillVoucher(Voucher voucher);
+    Long createVoucher(VoucherCreateRequest request);
+
+    Long createSeckillVoucher(SeckillVoucherCreateRequest request);
 }

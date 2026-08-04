@@ -12,6 +12,7 @@ import com.cityseek.dto.UserProfileUpdateDTO;
 import com.cityseek.entity.User;
 import com.cityseek.entity.UserInfo;
 import com.cityseek.mapper.UserMapper;
+import com.cityseek.security.UserRole;
 import com.cityseek.service.IUserInfoService;
 import com.cityseek.service.IUserService;
 import com.cityseek.utils.RegexUtils;
@@ -251,6 +252,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         User user = new User();
         user.setPhone(phone);
         user.setNickName(USER_NICK_NAME_PREFIX + RandomUtil.randomString(10));
+        user.setRole(UserRole.USER);
         try {
             if (!save(user)) {
                 throw new IllegalStateException("用户创建失败");

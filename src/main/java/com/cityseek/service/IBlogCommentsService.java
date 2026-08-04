@@ -1,20 +1,13 @@
 package com.cityseek.service;
 
-import com.cityseek.entity.BlogComments;
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.cityseek.dto.Result;
+import com.cityseek.dto.request.BlogCommentCreateRequest;
+import com.cityseek.entity.BlogComments;
 
-/**
- * <p>
- *  服务类
- * </p>
- *
- * @since 2021-12-22
- */
 public interface IBlogCommentsService extends IService<BlogComments> {
-
 
     Result queryByBlogId(Long blogId, Integer current);
 
-    Result addComment(BlogComments comment);
+    Result addComment(BlogCommentCreateRequest request);
 }
