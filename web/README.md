@@ -15,3 +15,5 @@
 3. 启动 Nginx，访问 `http://localhost:8080`。
 
 Nginx 二进制、日志、PID 和用户上传文件都属于运行环境产物，不提交到源码仓库。
+使用 Docker Compose 时无需手工配置 Nginx。在仓库根目录执行 `docker compose up -d --build`，
+编排会使用 `Dockerfile` 和 `nginx.docker.conf` 构建前端镜像，并把请求转发到后端容器。

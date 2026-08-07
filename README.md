@@ -60,10 +60,15 @@ cityseek/
 ├─ src/test/java/com/cityseek/            # 单元测试、容器测试与压测
 ├─ web/                                   # Vue 2 + Element UI 静态页面
 │  ├─ nginx.conf.example                  # 静态资源与反向代理配置示例
+│  ├─ nginx.docker.conf                   # Docker Nginx 反向代理配置
+│  ├─ Dockerfile                          # 前端 Nginx 镜像
 │  └─ README.md                           # 前端运行说明
 ├─ docs/                                  # 压测记录与后续改造方案
 │  ├─ SECKILL_LOAD_TEST.md
 │  └─ PROJECT_IMPROVEMENT_PLAN.md         # 本轮实现与验收状态
+├─ Dockerfile                             # 后端多阶段构建镜像
+├─ compose.yaml                           # MySQL、Redis、后端与前端编排
+├─ .env.example                           # Docker 环境变量模板
 ├─ pom.xml
 └─ README.md
 ```
@@ -146,7 +151,51 @@ cityseek/
 - Redis 6.2+（秒杀功能需要 Redis Stream 消费组）
 - Nginx 1.18（仅完整前端联调需要；不纳入 `cityseek-server` 源码仓库）
 
-## 快速启动
+## Docker Compose 一键部署
+
+需要 Docker Engine 24+ 和 Docker Compose v2。首次部署先复制环境变量模板并修改其中的密码：
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+```
+
+Linux/macOS 使用：
+
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
+
+编排包含以下服务：
+
+| 服务 | 用途 | 宿主机访问 |
+| --- | --- | --- |
+| `web` | Nginx 静态前端与反向代理 | `http://localhost:8080` |
+| `app` | Spring Boot 后端 | `http://127.0.0.1:8081` |
+| `mysql` | MySQL 8.4，首次启动自动导入完整 SQL | 默认不暴露 |
+| `redis` | Redis 7.4，开启 AOF 持久化 | 默认不暴露 |
+
+查看状态和日志：
+
+```bash
+docker compose ps
+docker compose logs -f app
+```
+
+停止服务不会删除数据：
+
+```bash
+docker compose down
+```
+
+MySQL、Redis 和上传图片分别保存在命名卷 `mysql-data`、`redis-data` 和 `uploads` 中。初始化 SQL
+只会在 MySQL 数据卷首次创建时执行。需要彻底重建演示数据时可执行 `docker compose down -v`，但该命令会永久删除以上数据卷。
+
+对公网部署前必须修改 `.env` 中的数据库和 Redis 密码，并通过防火墙或反向代理限制 `8080` 的访问范围。
+后端端口默认只绑定 `127.0.0.1`；如需关闭宿主机后端端口，可删除 `compose.yaml` 中 `app.ports` 配置。
+
+## 本地快速启动
 
 ### 1. 初始化 MySQL
 

@@ -1,0 +1,13 @@
+.git
+.gitattributes
+.gitignore
+.idea
+.vscode
+target
+data
+docs
+web
+*.iml
+*.log
+*.pid
+README.md
