@@ -97,7 +97,7 @@
           return;
         }
         // 发送验证码
-        axios.post("/user/code?phone="+this.form.phone)
+        axios.post("/user/code", null, {params: {phone: this.form.phone}})
           .then(() => {})
           .catch(err => {
             console.log(err);

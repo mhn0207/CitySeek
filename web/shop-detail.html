@@ -64,6 +64,15 @@
       <span class="voucher-icon">券</span>
       <span style="font-weight: bold;">代金券</span>
     </div>
+    <div class="order-processing" v-if="pendingOrderId">
+      <i :class="processingVoucherId !== null ? 'el-icon-loading' : 'el-icon-warning-outline'"></i>
+      <span>{{orderStatusMessage}}</span>
+      <button
+          type="button"
+          class="order-retry"
+          v-if="processingVoucherId === null"
+          @click="retryPendingOrder">重新查询</button>
+    </div>
     <div class="voucher-box" v-for="v in vouchers" :key="v.id" v-if="!isEnd(v)">
       <div class="voucher-circle">
         <div class="voucher-b"></div>
@@ -77,7 +86,14 @@
       </div>
       <div class="voucher-right">
         <div v-if="v.type" class="seckill-box">
-          <div class="voucher-btn" :class="{'disable-btn': isNotBegin(v) || v.stock < 1}" @click="seckill(v)">限时抢购</div>
+          <div
+              class="voucher-btn"
+              :class="{'disable-btn': isNotBegin(v) || v.stock < 1 || pendingOrderId !== null}"
+              @click="seckill(v)">
+            {{pendingOrderId && pendingVoucherId === v.id
+              ? (processingVoucherId !== null ? '订单确认中' : '等待确认')
+              : '限时抢购'}}
+          </div>
           <div class="seckill-stock">剩余 <span>{{v.stock}}</span> 张</div>
           <div class="seckill-time">{{formatTime(v)}}</div>
         </div>
@@ -145,20 +161,33 @@
 <script src="./js/common.js"></script>
 <script>
 
+  const PENDING_ORDER_STORAGE_KEY = "cityseek:pending-order";
+
   const app = new Vue({
     el: "#app",
     data: {
       util,
       shop: {},
-      vouchers: []
+      vouchers: [],
+      currentShopId: null,
+      processingVoucherId: null,
+      pendingVoucherId: null,
+      pendingOrderId: null,
+      orderStatusMessage: "",
+      orderStatusTimer: null
     },
     created() {
       // 获取参数
       let shopId = util.getUrlParam("id");
+      this.currentShopId = shopId;
       // 查询酒店信息
       this.queryShopById(shopId);
       // 查询优惠券信息
       this.queryVoucher(shopId);
+      this.restorePendingOrder();
+    },
+    beforeDestroy() {
+      this.clearOrderStatusTimer();
     },
     methods: {
       goBack() {
@@ -198,12 +227,17 @@
         return new Date(v.endTime).getTime() < new Date().getTime();
       },
       seckill(v){
-        if(!token){
+        if(!util.isAuthenticated()){
           this.$message.error("请先登录")
           // 未登录，跳转
           setTimeout(() => {
             location.href = "/login.html"
           }, 200);
+          return;
+        }
+        const storedPending = this.readStoredPendingOrder();
+        if(this.pendingOrderId !== null || storedPending){
+          this.$message.warning("已有订单尚未确认，请先查询该订单状态")
           return;
         }
         if(this.isNotBegin(v)){
@@ -219,13 +253,135 @@
           return;
         }
         let id = v.id;
+        this.processingVoucherId = id;
         // 秒杀抢购
         axios.post("/voucher-order/seckill/" + id)
         .then(({data}) => {
-          // 抢购成功，这里输出订单id，支付功能TODO
-          this.$message.success("抢购成功，订单id：" + data)
+          this.pendingVoucherId = id;
+          this.pendingOrderId = String(data);
+          this.orderStatusMessage = "订单 " + this.pendingOrderId + " 正在后台确认，请勿重复提交";
+          this.savePendingOrder();
+          this.$message.info("请求已受理，正在确认订单状态")
+          this.pollOrderStatus(this.pendingOrderId, 0)
         })
-        .catch(this.$message.error)
+        .catch(error => {
+          this.clearOrderStatusTimer();
+          this.processingVoucherId = null;
+          this.$message.error(error)
+        })
+      },
+      pollOrderStatus(orderId, attempt){
+        const maxAttempts = 60;
+        if(attempt >= maxAttempts){
+          this.pauseOrderPolling("订单 " + orderId + " 暂未确认，可重新查询");
+          this.$message.warning("订单处理时间较长，可稍后重新查询状态")
+          return;
+        }
+        this.clearOrderStatusTimer();
+        this.orderStatusTimer = setTimeout(() => {
+          axios.get("/voucher-order/status/" + encodeURIComponent(orderId), {timeout: 5000})
+            .then(({data}) => {
+              if(!data || data.status === "PENDING"){
+                this.pollOrderStatus(orderId, attempt + 1)
+                return;
+              }
+              if(data.status === "SUCCESS"){
+                this.clearPendingOrder();
+                this.queryVoucher(this.currentShopId);
+                this.$message.success("抢购成功，订单id：" + orderId)
+                return;
+              }
+              if(data.status === "FAILED"){
+                const message = data.error ? "下单失败：" + data.error : "下单失败，库存已恢复";
+                this.clearPendingOrder();
+                this.queryVoucher(this.currentShopId);
+                this.$message.error(message)
+                return;
+              }
+              this.pollOrderStatus(orderId, attempt + 1)
+            })
+            .catch(error => {
+              if(error === "订单不存在"){
+                this.clearPendingOrder();
+                this.$message.error("待确认订单不存在或无权访问")
+                return;
+              }
+              if(error === "请先登录"){
+                this.pauseOrderPolling("登录后可继续查询订单 " + orderId)
+                return;
+              }
+              this.pollOrderStatus(orderId, attempt + 1)
+            })
+        }, attempt === 0 ? 500 : 1000)
+      },
+      retryPendingOrder(){
+        if(!util.isAuthenticated()){
+          this.$message.error("请先登录")
+          setTimeout(() => location.href = "/login.html", 200)
+          return;
+        }
+        if(!this.pendingOrderId || this.pendingVoucherId === null){
+          return;
+        }
+        this.processingVoucherId = this.pendingVoucherId;
+        this.orderStatusMessage = "订单 " + this.pendingOrderId + " 正在重新查询";
+        this.pollOrderStatus(this.pendingOrderId, 0);
+      },
+      restorePendingOrder(){
+        if(!util.isAuthenticated()){
+          return;
+        }
+        const pending = this.readStoredPendingOrder();
+        if(!pending){
+          return;
+        }
+        this.pendingOrderId = String(pending.orderId);
+        this.pendingVoucherId = Number(pending.voucherId);
+        this.processingVoucherId = this.pendingVoucherId;
+        this.orderStatusMessage = "正在恢复订单 " + this.pendingOrderId + " 的处理状态";
+        this.pollOrderStatus(this.pendingOrderId, 0);
+      },
+      readStoredPendingOrder(){
+        const value = sessionStorage.getItem(PENDING_ORDER_STORAGE_KEY);
+        if(!value){
+          return null;
+        }
+        try {
+          const pending = JSON.parse(value);
+          if(!pending.orderId || pending.voucherId === undefined || !pending.shopId){
+            throw new Error("invalid pending order");
+          }
+          return pending;
+        } catch(error) {
+          sessionStorage.removeItem(PENDING_ORDER_STORAGE_KEY);
+          return null;
+        }
+      },
+      savePendingOrder(){
+        sessionStorage.setItem(PENDING_ORDER_STORAGE_KEY, JSON.stringify({
+          orderId: this.pendingOrderId,
+          voucherId: this.pendingVoucherId,
+          shopId: this.currentShopId
+        }));
+      },
+      clearOrderStatusTimer(){
+        if(this.orderStatusTimer !== null){
+          clearTimeout(this.orderStatusTimer)
+          this.orderStatusTimer = null
+        }
+      },
+      pauseOrderPolling(message){
+        this.clearOrderStatusTimer();
+        this.processingVoucherId = null;
+        this.orderStatusMessage = message;
+      },
+      clearPendingOrder(){
+        this.clearOrderStatusTimer();
+        sessionStorage.removeItem(PENDING_ORDER_STORAGE_KEY);
+        this.processingVoucherId = null;
+        this.pendingVoucherId = null;
+        this.pendingOrderId = null;
+        this.orderStatusMessage = "";
       }
     }
   })

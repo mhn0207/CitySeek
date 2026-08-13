@@ -83,7 +83,7 @@
           })
       },
       queryHotBlogsScroll() {
-        axios.get("/blog/hot?current=" + this.current)
+        axios.get("/blog/hot", {params: {current: this.current}})
           .then(({data}) => {
             data.forEach(b => b.img = b.images.split(",")[0]);
             this.blogs = this.blogs.concat(data);

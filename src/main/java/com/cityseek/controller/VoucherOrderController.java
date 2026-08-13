@@ -10,8 +10,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 
 import org.springframework.web.bind.annotation.RestController;
 
-import jakarta.annotation.Resource;
-
 /**
  * <p>
  *  前端控制器
@@ -22,12 +20,19 @@ import jakarta.annotation.Resource;
 @RequestMapping("/voucher-order")
 public class VoucherOrderController {
 
-    @Resource
-    private IVoucherOrderService voucherOrderService;
+    private final IVoucherOrderService voucherOrderService;
+
+    public VoucherOrderController(IVoucherOrderService voucherOrderService) {
+        this.voucherOrderService = voucherOrderService;
+    }
 
     @PostMapping("seckill/{id}")
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
-        return voucherOrderService.seckillVoucher(voucherId);
+        Result result = voucherOrderService.seckillVoucher(voucherId);
+        if (Boolean.TRUE.equals(result.getSuccess()) && result.getData() instanceof Number orderId) {
+            return Result.ok(orderId.toString());
+        }
+        return result;
     }
 
     @GetMapping("status/{id}")

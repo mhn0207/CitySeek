@@ -1,11 +1,11 @@
 let commonURL = "/api";
 // 设置后台服务地址
 axios.defaults.baseURL = commonURL;
-axios.defaults.timeout = 2000;
+axios.defaults.timeout = 10000;
 // request拦截器，将用户token放入头中
-let token = sessionStorage.getItem("token");
 axios.interceptors.request.use(
   config => {
+    const token = sessionStorage.getItem("token");
     if(token) config.headers['authorization'] = token
     return config
   },
@@ -23,33 +23,45 @@ axios.interceptors.response.use(function (response) {
 }, function (error) {
   // 一般是服务端异常或者网络异常
   console.log(error)
-  if(error.response.status == 401){
+  const response = error && error.response;
+  if(response && response.status === 401){
     // 未登录，跳转
     setTimeout(() => {
       location.href = "/login.html"
     }, 200);
     return Promise.reject("请先登录");
   }
-  return Promise.reject("服务器异常");
+  if (error && error.code === "ECONNABORTED") {
+    return Promise.reject("请求超时，请稍后确认处理结果");
+  }
+  if (!response) {
+    return Promise.reject("网络连接失败，请检查网络后重试");
+  }
+  const message = response.data && response.data.errorMsg;
+  return Promise.reject(message || "服务器异常");
 });
 axios.defaults.paramsSerializer = function(params) {
-  let p = "";
-  Object.keys(params).forEach(k => {
-    if(params[k]){
-      p = p + "&" + k + "=" + params[k]
+  const parts = [];
+  Object.keys(params || {}).forEach(key => {
+    const value = params[key];
+    if (value === undefined || value === null || value === "") {
+      return;
     }
-  })
-  return p;
+    const values = Array.isArray(value) ? value : [value];
+    values.forEach(item => {
+      parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(item));
+    });
+  });
+  return parts.join("&");
 }
 const util = {
   commonURL,
+  isAuthenticated() {
+    return Boolean(sessionStorage.getItem("token"));
+  },
   getUrlParam(name) {
-    let reg = new RegExp("(^|&)" + name + "=([^&]*)(&|$)", "i");
-    let r = window.location.search.substr(1).match(reg);
-    if (r != null) {
-      return decodeURI(r[2]);
-    }
-    return "";
+    const value = new URLSearchParams(window.location.search).get(name);
+    return value === null ? "" : value;
   },
   formatPrice(val) {
     if (typeof val === 'string') {
@@ -62,7 +74,7 @@ const util = {
       if (index < 0) {
         // 无小数
         p = val + "00";
-      } else if (index === p.length - 2) {
+      } else if (index === val.length - 2) {
         // 1位小数
         p = val.replace("\.", "") + "0";
       } else {

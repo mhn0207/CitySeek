@@ -146,6 +146,32 @@
     padding: 0 4px 2px 4px;
 }
 
+.order-processing {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    background-color: #fff7e6;
+    color: #d46b08;
+    font-size: 12px;
+}
+
+.order-processing span {
+    flex: 1;
+    overflow-wrap: anywhere;
+}
+
+.order-retry {
+    border: 0;
+    padding: 3px 8px;
+    border-radius: 10px;
+    background-color: #ff6633;
+    color: white;
+    cursor: pointer;
+}
+
 .voucher-box {
     background-color: #fff1f1;
     border-radius: 5px;

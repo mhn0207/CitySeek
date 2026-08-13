@@ -166,6 +166,8 @@
 .blog-text{
     width: 90%;
     padding: 5px 20px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 .copyright {
     color: #d1d1d1;
