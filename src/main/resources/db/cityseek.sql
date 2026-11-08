@@ -1,18 +1,5 @@
-/*
- Navicat Premium Data Transfer
-
- Source Server         : local
- Source Server Type    : MySQL
- Source Server Version : 50622
- Source Host           : localhost:3306
- Source Schema         : cityseek2
-
- Target Server Type    : MySQL
- Target Server Version : 50622
- File Encoding         : 65001
-
- Date: 02/03/2022 23:12:54
-*/
+-- CitySeek schema and demonstration fixtures; not a production database backup.
+-- Seed user phone numbers are synthetic placeholders for local development.
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
@@ -195,10 +182,10 @@ CREATE TABLE `tb_user`  (
 -- ----------------------------
 -- Records of tb_user
 -- ----------------------------
-INSERT INTO `tb_user` VALUES (1, '13686869696', '', '小鱼同学', '/imgs/blogs/blog1.jpg', 'ADMIN', '2021-12-24 10:27:19', '2022-01-11 16:04:00');
-INSERT INTO `tb_user` VALUES (2, '13838411438', '', '可可今天不吃肉', '/imgs/icons/kkjtbcr.jpg', 'USER', '2021-12-24 15:14:39', '2021-12-28 19:58:04');
-INSERT INTO `tb_user` VALUES (4, '13456789011', '', 'user_slxaxy2au9f3tanffaxr', '', 'USER', '2022-01-07 12:07:53', '2022-01-07 12:07:53');
-INSERT INTO `tb_user` VALUES (5, '13456789001', '', 'user_n0bb8mwwg4', '', 'USER', '2022-01-07 16:11:33', '2022-01-07 16:11:33');
+INSERT INTO `tb_user` VALUES (1, '13800000001', '', '小鱼同学', '/imgs/blogs/blog1.jpg', 'ADMIN', '2021-12-24 10:27:19', '2022-01-11 16:04:00');
+INSERT INTO `tb_user` VALUES (2, '13800000002', '', '可可今天不吃肉', '/imgs/icons/kkjtbcr.jpg', 'USER', '2021-12-24 15:14:39', '2021-12-28 19:58:04');
+INSERT INTO `tb_user` VALUES (4, '13800000004', '', 'user_slxaxy2au9f3tanffaxr', '', 'USER', '2022-01-07 12:07:53', '2022-01-07 12:07:53');
+INSERT INTO `tb_user` VALUES (5, '13800000005', '', 'user_n0bb8mwwg4', '', 'USER', '2022-01-07 16:11:33', '2022-01-07 16:11:33');
 
 -- ----------------------------
 -- Table structure for tb_user_info

@@ -1,0 +1,24 @@
+Executed: 2026-11-05 (Asia/Shanghai)
+Command: mvn -B test
+Source: target/surefire-reports/TEST-*.xml from this regression run
+Excluded: VoucherSeckillLoadIT (explicit load runs recorded separately)
+
+Class | Tests | Failures | Errors | Skipped
+com.cityseek.CitySeekApplicationTests | 3 | 0 | 0 | 0
+com.cityseek.controller.VoucherOrderControllerTest | 2 | 0 | 0 | 0
+com.cityseek.integration.AuthorizationIntegrationTest | 1 | 0 | 0 | 0
+com.cityseek.integration.FeedOutboxIntegrationTest | 1 | 0 | 0 | 0
+com.cityseek.integration.OutboxLeaseIntegrationTest | 1 | 0 | 0 | 0
+com.cityseek.integration.ShopGeoIntegrationTest | 1 | 0 | 0 | 0
+com.cityseek.integration.UploadOwnershipIntegrationTest | 1 | 0 | 0 | 0
+com.cityseek.integration.VoucherOrderReliabilityIntegrationTest | 3 | 0 | 0 | 0
+com.cityseek.metrics.VoucherOrderMetricsTest | 1 | 0 | 0 | 0
+com.cityseek.RequestValidationTest | 2 | 0 | 0 | 0
+com.cityseek.security.RoleInterceptorTest | 2 | 0 | 0 | 0
+com.cityseek.service.impl.BlogServiceImplTest | 3 | 0 | 0 | 0
+com.cityseek.service.impl.ShopServiceImplTest | 1 | 0 | 0 | 0
+com.cityseek.service.impl.UserServiceImplTest | 3 | 0 | 0 | 0
+com.cityseek.service.UploadFileValidationTest | 2 | 0 | 0 | 0
+
+Total | 27 | 0 | 0 | 0
+Result: BUILD SUCCESS

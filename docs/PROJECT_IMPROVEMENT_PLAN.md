@@ -1,11 +1,13 @@
 # CitySeek 投递前改造方案
 
-> **状态：核心方案已实现，真实容器验收待完成。**
+> **状态更新：2026-11-05。核心实现已落地；本文件保留历史设计，具体实现以当前代码为准。**
 >
-> DTO、GEO 提交后同步、RBAC/图片所有权、Stream 指标和 Feed MySQL Outbox 已落地，并补充了
-> 增量 SQL 与自动化测试。2026-07-30 执行 `mvn test` 时非容器测试全部通过；当前机器 Docker
-> 不可用，Testcontainers 用例被跳过，因此第 11 节仍保留真实依赖验收项。第 7.10 节 RabbitMQ
-> 是可选 P2 扩展，本轮未引入，不能描述为已经实现。
+> DTO、GEO 提交后同步、RBAC/图片所有权、Stream 指标和 Feed MySQL Outbox 已落地。
+> 历史 README 曾记录 27 tests、0 skipped；本机遗留的 2026-09-07 常规测试报告则有 8 个容器用例被跳过，
+> 因此不能把历史记录当作当前环境的验收结论。2026-11-05 重新执行 `mvn -B test`，
+> 结果为 27 tests、0 failures、0 errors、0 skipped，含 8 个容器用例。本次复测结果统一记录在 README 和
+> [压测记录](SECKILL_LOAD_TEST.md)，项目来源与改造概述见 [README](../README.md)。
+> 第 7.10 节 RabbitMQ 仍是未实现的可选扩展；本文件中的设计代码片段不是当前实现的完整复制。
 
 ## 1. 目标与范围
 
@@ -668,11 +670,14 @@ CREATE TABLE tb_outbox_event (
 );
 ```
 
-`claimed_by` 用于审计当前领取实例，`claim_token` 是每次领取生成的唯一 fencing token，
+`claimed_by` 用于审计当前领取实例，`claim_token` 是每次领取生成的唯一 UUID 领取凭证，
 `processing_deadline` 是处理租约截止时间。直接写 Redis 的 Worker 和后续 RabbitMQ Publisher
 都必须复用这套租约规则。它们用于恢复“任务已经改成 `PROCESSING`，但执行实例在投递完成前宕机”
 的情况，不能省略。完成、失败和续租操作都必须携带本次 `claim_token`；条件更新影响行数为 0 时，
 说明租约已经丢失，旧执行者必须停止更新状态。
+
+当前实现通过 token 条件更新保护 Outbox 状态；该 token 不是单调递增、由 Redis 校验的 fencing token。
+Redis 投递仍依赖固定 blogId 和发布时间的幂等 ZADD，不能据此声称旧 Worker 的所有外部写入都被阻止。
 
 事件示例：
 
@@ -1079,7 +1084,12 @@ docs: document consistency and failure recovery design
 
 提交信息只是建议，实际提交必须与真实完成的改动一致，不应伪造开发历史。
 
-## 11. 最终验收清单
+## 11. 实现与验收清单
+
+下方功能、一致性和可观测性勾选表示已有实现，不代表所有对应故障场景均完成实测。
+现有 `ShopGeoIntegrationTest` 验证正常修改类型后的 GEO 迁移；`FeedOutboxIntegrationTest` 验证投递和幂等重投；
+`OutboxLeaseIntegrationTest` 验证过期接管及旧 token 无法完成事件。
+这些测试不能替代真实 Redis 断连、完整进程强杀或事务回滚注入等验收。
 
 ### 功能
 
@@ -1102,13 +1112,13 @@ docs: document consistency and failure recovery design
 - [x] 可以查看秒杀受理、拒绝、落库、重试、补偿和 DLQ 指标；
 - [x] 可以查看 Stream 长度、Pending、最老 Pending 时间和消费 lag；
 - [x] 指标采集失败不会影响订单消费；
-- [x] Actuator 端点仅允许管理员访问。
+- [x] Actuator 端点由 RoleInterceptor 要求管理员权限（含健康检查）。
 
 ### 测试与交付
 
-- [x] 单元测试全部通过；
-- [ ] MySQL/Redis Testcontainers 集成测试通过（用例已补齐，当前机器无 Docker，尚未实际通过）；
-- [ ] 至少完成 GEO 与 Feed 两组故障场景测试（用例已补齐，等待 Docker 环境执行）；
+- [x] 单元测试全部通过（2026-11-05 复测）；
+- [x] 本次 MySQL/Redis Testcontainers 集成测试通过（2026-11-05 常规回归共 27 用例，其中 8 个容器用例，0 skipped）；
+- [ ] GEO 事务回滚与 Feed 真实 Redis 断连等故障注入验收（现有迁移、幂等和租约测试不能替代）；
 - [x] 数据库变更有独立迁移脚本；
 - [x] README 包含架构、启动、测试和故障恢复说明。
 

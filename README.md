@@ -27,11 +27,15 @@
 
 CitySeek 是一个前后端完整的本地生活项目，覆盖商铺检索、达人探店、关注 Feed、用户签到、图片上传和优惠券秒杀等业务。项目不仅实现业务功能，还围绕并发一致性、故障恢复、权限边界、可观测性和自动化测试进行了工程化改造。
 
+### 项目来源与改造
+
+本项目基于 Redis 实战课程项目进行扩展，重点改造了秒杀故障恢复、Feed 事务 Outbox、权限与图片所有权、GEO 同步、测试及容器交付。
+
 它适合作为以下方向的学习或作品集项目：
 
 - Redis 数据结构与典型业务场景实践；
 - 高并发秒杀、异步下单和最终一致性设计；
-- MySQL Outbox、租约与 fencing token 可靠投递；
+- MySQL Outbox、租约与 claim token 条件更新；
 - Spring Boot 3 项目的测试、监控与容器化交付。
 
 ## 项目亮点
@@ -40,7 +44,7 @@ CitySeek 是一个前后端完整的本地生活项目，覆盖商铺检索、�
 | --- | --- |
 | 高并发秒杀 | Lua 原子预检与扣库存、Redis Stream 异步削峰、Redisson 用户锁、MySQL 条件扣库存与唯一索引 |
 | 故障恢复 | `XAUTOCLAIM` 自动接管 Pending、有限重试、幂等补偿、有界 DLQ、`PENDING/SUCCESS/FAILED` 状态查询 |
-| Feed 可靠投递 | Blog 与 Outbox 同事务写入，Worker 使用租约、claim token、分页与 Redis Pipeline 投递 |
+| Feed 可靠投递 | Blog 与 Outbox 同事务写入，Worker 使用租约、claim token 条件更新、分页与 Redis Pipeline 幂等投递 |
 | 缓存与检索 | 缓存空值防穿透，互斥锁/逻辑过期防击穿，Redis GEO 5 公里范围检索及全量对账 |
 | 安全与权限 | 默认鉴权、显式公开接口、简单 RBAC、验证码频控与原子消费、上传文件所有权校验 |
 | 工程质量 | Docker Compose 一键部署、Testcontainers 真实依赖测试、Prometheus 指标、健康检查与 HTTP 压测 |
@@ -121,7 +125,7 @@ sequenceDiagram
 | 后端 | Java 17、Spring Boot 3.4.4、Spring MVC、Jakarta Validation |
 | 数据访问 | MyBatis-Plus 3.5.7、MySQL 8 |
 | Redis | Spring Data Redis、Redisson 3.40.2、Lua、String/Hash/Set/ZSet/Bitmap/GEO/Stream |
-| 可靠性 | Redis Stream、MySQL Outbox、租约、fencing token、DLQ |
+| 可靠性 | Redis Stream、MySQL Outbox、租约、claim token、DLQ |
 | 可观测性 | Spring Boot Actuator、Micrometer、Prometheus |
 | 前端 | Vue 2、Element UI、Axios、Nginx |
 | 测试 | JUnit 5、Mockito、Testcontainers、真实 HTTP 并发压测 |
@@ -292,9 +296,9 @@ APP_LOG_LEVEL=debug
 mvn test
 ```
 
-测试覆盖请求校验、权限拦截、缓存逻辑、图片所有权、GEO 类型迁移、Feed Outbox 幂等与租约 fencing、秒杀可靠性等场景。集成测试使用 Testcontainers 启动 MySQL 8.0.36 和 Redis 7.2。
+测试覆盖请求校验、权限拦截、缓存逻辑、图片所有权、GEO 类型迁移、Feed Outbox 幂等与租约 token 校验、秒杀可靠性等场景。集成测试使用 Testcontainers 启动 MySQL 8.0.36 和 Redis 7.2。
 
-当前本机回归结果：**27 tests，0 failures，0 errors，0 skipped**。Docker 不可用时容器测试会跳过，因此验收时需要同时检查 `Skipped` 数量。
+2026-11-05 重新执行 `mvn -B test`：**27 tests，0 failures，0 errors，0 skipped**，包含 8 个真实 MySQL/Redis 容器用例。[逐类统计](docs/performance/2026-11-05-regression.txt)留存了本轮结果。该统计不包含需显式指定的 HTTP 压测 `VoucherSeckillLoadIT`；Docker 不可用时容器测试会跳过，因此验收时需要同时检查 `Skipped` 数量。
 
 单独执行秒杀可靠性测试：
 
@@ -311,7 +315,9 @@ mvn -Dtest=VoucherSeckillLoadIT \
   -Dload.concurrency=100 test
 ```
 
-2026-08-08，本机 Docker Desktop 单实例阶梯压测结果：
+2026-11-05 新口径复测（均为 500 请求、200 库存）：100 并发通过，HTTP P95 约 2.04 秒，SUCCESS 可见 P95 约 7.42 秒；500 并发两轮分别出现 97/37 次请求错误，整体失败，分类复测的 37 次均为 `ConnectException`。三轮的 200 个受理订单最终均完成且库存一致。当前测量指向单消费者排队及高并发建连问题，尚未单独定位到某条 SQL，也未宣称性能提升。完整对比与原始报告见 [压测记录](docs/SECKILL_LOAD_TEST.md)。
+
+以下为 2026-08-08 的历史阶梯压测记录（旧测量与错误统计口径，不能当作本轮验收结论）：
 
 | 并发 | 请求 / 库存 | 结果 | 吞吐量 | P95 延迟 | HTTP 成功率 |
 | ---: | ---: | --- | ---: | ---: | ---: |
@@ -322,7 +328,7 @@ mvn -Dtest=VoucherSeckillLoadIT \
 
 通过档均未超卖，受理数、数据库订单数、成功状态数与 Redis/MySQL 库存一致。500 并发、800 库存档在请求结束后 30 秒内未完成异步落库，说明单实例的消费积压和尾延迟已成为容量边界，但不能据此判断为数据丢失。
 
-压测报告会写入 `target/seckill-load-test-report.md`。详细口径、复现方法和边界说明见 [`docs/SECKILL_LOAD_TEST.md`](docs/SECKILL_LOAD_TEST.md)。本机数据仅用于回归基线，不代表生产容量承诺。
+压测报告会写入 `target/seckill-load-test-report.md`，并按时间和负载参数归档到 `target/load-reports/`。报告区分 HTTP 响应、数据库可见、最终 SUCCESS 可见和请求结束后的排空时间；异步排空超时也会先写出 FAIL 报告再断言失败。详细口径、复现方法和边界说明见 [`docs/SECKILL_LOAD_TEST.md`](docs/SECKILL_LOAD_TEST.md)。本机数据仅用于回归基线，不代表生产容量承诺。
 
 ## 可观测性
 

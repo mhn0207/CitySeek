@@ -37,3 +37,12 @@ data/
 *.log
 *.pid
 .env
+.env.*
+!.env.example
+application-local.yaml
+application-local.yml
+application-local.properties
+*.pem
+*.key
+*.p12
+*.pfx
