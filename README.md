@@ -219,8 +219,11 @@ APP_LOG_LEVEL=debug
 | `REDIS_HOST` / `REDIS_PORT` | `127.0.0.1` / `6379` | Redis 地址 |
 | `REDIS_PASSWORD` | 空 | Redis 密码 |
 | `IMAGE_UPLOAD_DIR` | `./data/images` | 图片存储目录 |
-| `REDIS_STREAM_CONSUMER` | `cityseek-consumer` | Stream 消费者名称，多实例必须唯一 |
-| `REDIS_PENDING_MIN_IDLE` | `30s` | Pending 可被接管前的最小空闲时间 |
+| `REDIS_STREAM_CONSUMER` | `cityseek-consumer` | Stream 消费者名称前缀，每个应用实例须使用唯一前缀 |
+| `REDIS_STREAM_CONSUMER_CONCURRENCY` | `4` | 每个应用实例的订单消费者数量 |
+| `REDIS_STREAM_READ_BATCH_SIZE` | `16` | 每个消费者单次读取的消息数上限 |
+| `REDIS_PENDING_MIN_IDLE` | `30s` | 消息可被接管前的最短空闲时间 |
+| `REDIS_PENDING_RECOVERY_INTERVAL` | `5s` | Pending 消息扫描间隔 |
 | `REDIS_DLQ_MAX_LENGTH` | `10000` | 订单 DLQ 近似最大长度 |
 | `FEED_OUTBOX_ENABLED` | `true` | 是否启用 Feed Outbox Worker |
 | `FEED_OUTBOX_LEASE_DURATION` | `30s` | Outbox 处理租约 |
@@ -300,6 +303,8 @@ mvn test
 
 2026-11-05 重新执行 `mvn -B test`：**27 tests，0 failures，0 errors，0 skipped**，包含 8 个真实 MySQL/Redis 容器用例。[逐类统计](docs/performance/2026-11-05-regression.txt)留存了本轮结果。该统计不包含需显式指定的 HTTP 压测 `VoucherSeckillLoadIT`；Docker 不可用时容器测试会跳过，因此验收时需要同时检查 `Skipped` 数量。
 
+2026-11-24 在 Docker 可用的环境执行常规回归，**32 项通过，0 失败，0 跳过**，其中 8 项使用真实 MySQL / Redis 容器。另用 Compose 验证了 Nginx 入口的验证码登录、发券、下单、重复下单拦截和库存一致性。 [复测记录](docs/performance/2026-11-24-seckill-retest.md)
+
 单独执行秒杀可靠性测试：
 
 ```bash
@@ -309,13 +314,15 @@ mvn -Dtest=VoucherOrderReliabilityIntegrationTest test
 ### HTTP 并发压测
 
 ```bash
-mvn -Dtest=VoucherSeckillLoadIT \
-  -Dload.requests=500 \
-  -Dload.stock=200 \
-  -Dload.concurrency=100 test
+mvn -B -Dtest=VoucherSeckillLoadIT \
+  -Dload.requests=500 -Dload.stock=200 -Dload.concurrency=100 \
+  -Dapp.redis.stream-consumer-concurrency=4 \
+  -Dapp.redis.pending-min-idle=30s -Dapp.redis.pending-recovery-interval=5s test
 ```
 
-2026-11-05 新口径复测（均为 500 请求、200 库存）：100 并发通过，HTTP P95 约 2.04 秒，SUCCESS 可见 P95 约 7.42 秒；500 并发两轮分别出现 97/37 次请求错误，整体失败，分类复测的 37 次均为 `ConnectException`。三轮的 200 个受理订单最终均完成且库存一致。当前测量指向单消费者排队及高并发建连问题，尚未单独定位到某条 SQL，也未宣称性能提升。完整对比与原始报告见 [压测记录](docs/SECKILL_LOAD_TEST.md)。
+2026-11-24 使用应用默认的消息接管设置复测，每轮 500 个请求、200 张券。4 个订单消费者相较于 1 个，订单成功可见 P95 在四组对照中降低 **12.5%～21.0%**。100 并发四轮通过。500 并发四轮仍有连接错误，所有已受理订单均已落库且库存一致。 [复测数据与复现命令](docs/performance/2026-11-24-seckill-retest.md)
+
+2026-11-05 历史复测（均为 500 请求、200 库存）：100 并发通过，HTTP P95 约 2.04 秒，SUCCESS 可见 P95 约 7.42 秒；500 并发两轮分别出现 97/37 次请求错误，整体失败，分类复测的 37 次均为 `ConnectException`。三轮的 200 个受理订单最终均完成且库存一致。当时的测量观察到了单消费者排队和高并发建连问题。完整对比与原始报告见 [压测记录](docs/SECKILL_LOAD_TEST.md)。
 
 以下为 2026-08-08 的历史阶梯压测记录（旧测量与错误统计口径，不能当作本轮验收结论）：
 

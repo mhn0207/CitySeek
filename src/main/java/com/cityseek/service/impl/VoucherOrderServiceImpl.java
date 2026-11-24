@@ -20,6 +20,7 @@ import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.connection.RedisStreamCommands;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
@@ -40,6 +41,8 @@ import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static com.cityseek.utils.RedisConstants.SECKILL_ORDER_STATUS_KEY;
 import static com.cityseek.utils.RedisConstants.SECKILL_ORDER_STATUS_TTL;
@@ -58,6 +61,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
     private static final DefaultRedisScript<Long> COMPENSATE_SCRIPT;
+    private static final DefaultRedisScript<Long> STATUS_SUCCESS_SCRIPT;
 
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
@@ -67,6 +71,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         COMPENSATE_SCRIPT = new DefaultRedisScript<>();
         COMPENSATE_SCRIPT.setLocation(new ClassPathResource("seckill-compensate.lua"));
         COMPENSATE_SCRIPT.setResultType(Long.class);
+
+        STATUS_SUCCESS_SCRIPT = new DefaultRedisScript<>();
+        STATUS_SUCCESS_SCRIPT.setLocation(new ClassPathResource("seckill-status-success.lua"));
+        STATUS_SUCCESS_SCRIPT.setResultType(Long.class);
     }
 
     @Resource
@@ -91,38 +99,55 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private VoucherOrderMetrics metrics;
 
     @Value("${app.redis.stream-consumer:cityseek-consumer}")
-    private String consumerName;
+    private String consumerName = "cityseek-consumer";
+
+    @Value("${app.redis.stream-consumer-concurrency:4}")
+    private int streamConsumerConcurrency = 4;
+
+    @Value("${app.redis.stream-read-batch-size:16}")
+    private int streamReadBatchSize = 16;
 
     @Value("${app.redis.pending-min-idle:30s}")
-    private Duration pendingMinIdle;
+    private Duration pendingMinIdle = Duration.ofSeconds(30);
 
     @Value("${app.redis.pending-recovery-interval:5s}")
-    private Duration pendingRecoveryInterval;
+    private Duration pendingRecoveryInterval = Duration.ofSeconds(5);
 
     @Value("${app.redis.pending-batch-size:20}")
-    private int pendingBatchSize;
-
+    private int pendingBatchSize = 20;
 
     @Value("${app.redis.dlq-max-length:10000}")
-    private long dlqMaxLength;
+    private long dlqMaxLength = 10000L;
 
-    private volatile long nextPendingRecoveryAtNanos;
+    private final AtomicLong nextPendingRecoveryAtNanos = new AtomicLong();
 
-    private final ExecutorService orderExecutor = Executors.newSingleThreadExecutor(task -> {
-        Thread thread = new Thread(task, "voucher-order-consumer");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private ExecutorService orderExecutor;
 
     @PostConstruct
     void init() {
         createConsumerGroup();
-        orderExecutor.submit(this::consumeOrders);
+        int workerCount = Math.max(1, streamConsumerConcurrency);
+        AtomicInteger threadSequence = new AtomicInteger(1);
+        orderExecutor = Executors.newFixedThreadPool(workerCount, task -> {
+            Thread thread = new Thread(task, "voucher-order-consumer-" + threadSequence.getAndIncrement());
+            thread.setDaemon(true);
+            return thread;
+        });
+        for (int index = 0; index < workerCount; index++) {
+            String workerName = workerConsumerName(index, workerCount);
+            orderExecutor.submit(() -> consumeOrders(workerName));
+        }
     }
 
     @PreDestroy
     void shutdown() {
-        orderExecutor.shutdownNow();
+        if (orderExecutor != null) {
+            orderExecutor.shutdownNow();
+        }
+    }
+
+    String workerConsumerName(int index, int workerCount) {
+        return workerCount <= 1 ? consumerName : consumerName + "-" + (index + 1);
     }
 
     @Override
@@ -213,40 +238,63 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }
 
-    private void consumeOrders() {
+    private void consumeOrders(String workerConsumerName) {
+        int batchSize = Math.max(1, streamReadBatchSize);
         while (!Thread.currentThread().isInterrupted()) {
             try {
-                recoverPendingIfDue();
+                recoverPendingIfDue(workerConsumerName);
                 List<MapRecord<String, Object, Object>> records = stringRedisTemplate.opsForStream().read(
-                        Consumer.from(GROUP_NAME, consumerName),
-                        StreamReadOptions.empty().count(1).block(Duration.ofSeconds(2)),
+                        Consumer.from(GROUP_NAME, workerConsumerName),
+                        StreamReadOptions.empty().count(batchSize).block(Duration.ofSeconds(2)),
                         StreamOffset.create(STREAM_KEY, ReadOffset.lastConsumed())
                 );
                 if (records == null || records.isEmpty()) {
                     continue;
                 }
-                processRecord(records.get(0));
+                consumeBatch(records, workerConsumerName);
             } catch (RuntimeException exception) {
                 if (Thread.currentThread().isInterrupted()) {
                     break;
                 }
-                log.error("Failed to consume voucher order", exception);
+                log.error("Failed to read voucher order stream on consumer {}", workerConsumerName, exception);
                 sleepQuietly(100L);
             }
         }
     }
 
-    private void recoverPendingIfDue() {
-        long now = System.nanoTime();
-        if (now < nextPendingRecoveryAtNanos) {
-            return;
+    void consumeBatch(List<MapRecord<String, Object, Object>> records, String workerConsumerName) {
+        for (MapRecord<String, Object, Object> record : records) {
+            if (Thread.currentThread().isInterrupted()) {
+                break;
+            }
+            try {
+                processRecord(record, false);
+            } catch (RuntimeException exception) {
+                if (Thread.currentThread().isInterrupted()) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                log.error("Failed to consume voucher order {} on consumer {}",
+                        record.getId(), workerConsumerName, exception);
+            }
         }
-        long intervalNanos = Math.max(TimeUnit.MILLISECONDS.toNanos(100L), pendingRecoveryInterval.toNanos());
-        nextPendingRecoveryAtNanos = now + intervalNanos;
-        recoverPendingOrders();
     }
 
-    void recoverPendingOrders() {
+    boolean recoverPendingIfDue(String claimantConsumer) {
+        long now = System.nanoTime();
+        long dueAt = nextPendingRecoveryAtNanos.get();
+        if (now < dueAt) {
+            return false;
+        }
+        long intervalNanos = Math.max(TimeUnit.MILLISECONDS.toNanos(100L), pendingRecoveryInterval.toNanos());
+        if (!nextPendingRecoveryAtNanos.compareAndSet(dueAt, now + intervalNanos)) {
+            return false;
+        }
+        recoverPendingOrders(claimantConsumer);
+        return true;
+    }
+
+    private void recoverPendingOrders(String claimantConsumer) {
         String cursor = "0-0";
         for (int batchNumber = 0;
              batchNumber < MAX_PENDING_SCAN_BATCHES && !Thread.currentThread().isInterrupted();
@@ -254,14 +302,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             RedisStreamPendingClaimer.ClaimBatch batch = pendingClaimer.autoClaim(
                     STREAM_KEY,
                     GROUP_NAME,
-                    consumerName,
+                    claimantConsumer,
                     pendingMinIdle,
                     cursor,
                     Math.max(1, pendingBatchSize)
             );
             for (MapRecord<String, Object, Object> record : batch.records()) {
                 try {
-                    processRecord(record);
+                    processRecord(record, true);
                 } catch (RuntimeException exception) {
                     log.warn("Pending voucher order remains unacknowledged: {}", record.getId(), exception);
                 }
@@ -274,17 +322,19 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }
 
-    private void processRecord(MapRecord<String, Object, Object> record) {
+    void processRecord(MapRecord<String, Object, Object> record, boolean isRedelivery) {
         var sample = metrics.startProcessing();
         String retryKey = RETRY_KEY_PREFIX + record.getId().getValue();
         VoucherOrder order = null;
         try {
             order = BeanUtil.fillBeanWithMap(record.getValue(), new VoucherOrder(), true);
             validateOrderMessage(order);
-            VoucherOrder persistedOrder = createVoucherOrder(order);
+            VoucherOrder persistedOrder = createVoucherOrder(order, isRedelivery);
             markOrderStatusSuccess(order, persistedOrder.getId());
             acknowledge(record);
-            stringRedisTemplate.delete(retryKey);
+            if (isRedelivery) {
+                stringRedisTemplate.delete(retryKey);
+            }
         } catch (RuntimeException exception) {
             handleProcessingFailure(record, order, retryKey, exception);
         } finally {
@@ -357,31 +407,46 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
     }
 
-    private VoucherOrder createVoucherOrder(VoucherOrder order) {
+    private VoucherOrder createVoucherOrder(VoucherOrder order, boolean isRedelivery) {
         RLock lock = redissonClient.getLock("lock:order:" + order.getUserId());
         if (!lock.tryLock()) {
             throw new IllegalStateException("订单正在处理中");
         }
         try {
             boolean[] created = {false};
-            VoucherOrder persisted = transactionTemplate.execute(status -> {
+            VoucherOrder persisted;
+            try {
+                persisted = transactionTemplate.execute(status -> {
+                    if (isRedelivery) {
+                        VoucherOrder existing = findPersistedOrder(order);
+                        if (existing != null) {
+                            return existing;
+                        }
+                    }
+                    boolean stockUpdated = seckillVoucherService.update()
+                            .setSql("stock = stock - 1")
+                            .eq("voucher_id", order.getVoucherId()).gt("stock", 0)
+                            .update();
+                    if (!stockUpdated) {
+                        VoucherOrder existing = findPersistedOrder(order);
+                        if (existing != null) {
+                            return existing;
+                        }
+                        throw new IllegalStateException("数据库库存不足");
+                    }
+                    if (!save(order)) {
+                        throw new IllegalStateException("订单保存失败");
+                    }
+                    created[0] = true;
+                    return order;
+                });
+            } catch (DuplicateKeyException duplicateKeyException) {
                 VoucherOrder existing = findPersistedOrder(order);
-                if (existing != null) {
-                    return existing;
+                if (existing == null) {
+                    throw duplicateKeyException;
                 }
-                boolean stockUpdated = seckillVoucherService.update()
-                        .setSql("stock = stock - 1")
-                        .eq("voucher_id", order.getVoucherId()).gt("stock", 0)
-                        .update();
-                if (!stockUpdated) {
-                    throw new IllegalStateException("数据库库存不足");
-                }
-                if (!save(order)) {
-                    throw new IllegalStateException("订单保存失败");
-                }
-                created[0] = true;
-                return order;
-            });
+                persisted = existing;
+            }
             if (persisted == null) {
                 throw new IllegalStateException("订单事务未返回结果");
             }
@@ -414,17 +479,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     private void markOrderStatusSuccess(VoucherOrder order, Long persistedOrderId) {
         String key = SECKILL_ORDER_STATUS_KEY + order.getId();
-        Map<String, String> fields = new HashMap<>();
-        fields.put("status", "SUCCESS");
-        fields.put("userId", order.getUserId().toString());
-        fields.put("voucherId", order.getVoucherId().toString());
-        fields.put("persistedOrderId", persistedOrderId.toString());
-        fields.put("error", "");
-        fields.put("updatedAt", Long.toString(System.currentTimeMillis()));
-        stringRedisTemplate.opsForHash().putAll(key, fields);
-        Boolean expirationSet = stringRedisTemplate.expire(
-                key, SECKILL_ORDER_STATUS_TTL, TimeUnit.DAYS);
-        if (!Boolean.TRUE.equals(expirationSet)) {
+        Long expirationSet = stringRedisTemplate.execute(
+                STATUS_SUCCESS_SCRIPT,
+                Collections.singletonList(key),
+                order.getUserId().toString(),
+                order.getVoucherId().toString(),
+                persistedOrderId.toString(),
+                Long.toString(System.currentTimeMillis()),
+                Long.toString(orderStatusTtlSeconds())
+        );
+        if (!Long.valueOf(1L).equals(expirationSet)) {
             throw new IllegalStateException("订单状态过期时间设置失败");
         }
     }

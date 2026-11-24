@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.core.env.Environment;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
@@ -66,6 +67,9 @@ class VoucherSeckillLoadIT extends ContainerIntegrationTest {
 
     @Autowired
     private MeterRegistry meterRegistry;
+
+    @Autowired
+    private Environment environment;
 
     @Test
     void runHttpSeckillLoadTest() throws Exception {
@@ -317,6 +321,9 @@ class VoucherSeckillLoadIT extends ContainerIntegrationTest {
                 + "| --- | ---: |\n"
                 + "| Requests | " + requests + " |\n"
                 + "| Concurrency | " + concurrency + " |\n"
+                + "| Order consumers | " + environment.getRequiredProperty("app.redis.stream-consumer-concurrency") + " |\n"
+                + "| Pending minimum idle | " + environment.getRequiredProperty("app.redis.pending-min-idle") + " |\n"
+                + "| Pending recovery interval | " + environment.getRequiredProperty("app.redis.pending-recovery-interval") + " |\n"
                 + "| Initial stock | " + stock + " |\n"
                 + "| Connect timeout (ms) | " + Long.getLong("load.connect-timeout-ms", 5_000L) + " |\n"
                 + "| Request timeout (ms) | " + Long.getLong("load.request-timeout-ms", 10_000L) + " |\n"
