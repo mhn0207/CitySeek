@@ -1,5 +1,11 @@
 server:
   port: ${SERVER_PORT:8081}
+  tomcat:
+    accept-count: ${SERVER_TOMCAT_ACCEPT_COUNT:1024}
+    max-connections: ${SERVER_TOMCAT_MAX_CONNECTIONS:10000}
+    threads:
+      max: ${SERVER_TOMCAT_THREADS_MAX:256}
+      min-spare: ${SERVER_TOMCAT_THREADS_MIN_SPARE:32}
 spring:
   application:
     name: cityseek-server
@@ -8,6 +14,9 @@ spring:
     url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/cityseek?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true}
     username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:30}
+      minimum-idle: ${DB_POOL_MIN_IDLE:10}
   data:
     redis:
       host: ${REDIS_HOST:127.0.0.1}
@@ -17,9 +26,9 @@ spring:
       timeout: 10s
       lettuce:
         pool:
-          max-active: 10
-          max-idle: 10
-          min-idle: 1
+          max-active: ${REDIS_POOL_MAX_ACTIVE:64}
+          max-idle: ${REDIS_POOL_MAX_IDLE:32}
+          min-idle: ${REDIS_POOL_MIN_IDLE:8}
           time-between-eviction-runs: 10s
   servlet:
     multipart:
@@ -45,6 +54,8 @@ app:
   redis:
     initialize-cache: ${REDIS_INITIALIZE_CACHE:true}
     stream-consumer: ${REDIS_STREAM_CONSUMER:cityseek-consumer}
+    stream-consumer-concurrency: ${REDIS_STREAM_CONSUMER_CONCURRENCY:4}
+    stream-read-batch-size: ${REDIS_STREAM_READ_BATCH_SIZE:16}
     pending-min-idle: ${REDIS_PENDING_MIN_IDLE:30s}
     pending-recovery-interval: ${REDIS_PENDING_RECOVERY_INTERVAL:5s}
     pending-batch-size: ${REDIS_PENDING_BATCH_SIZE:20}
