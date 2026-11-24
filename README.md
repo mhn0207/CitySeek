@@ -320,7 +320,7 @@ mvn -B -Dtest=VoucherSeckillLoadIT \
   -Dapp.redis.pending-min-idle=30s -Dapp.redis.pending-recovery-interval=5s test
 ```
 
-2026-11-24 使用应用默认的消息接管设置复测，每轮 500 个请求、200 张券。4 个订单消费者相较于 1 个，订单成功可见 P95 在四组对照中降低 **12.5%～21.0%**。100 并发四轮通过。500 并发四轮仍有连接错误，所有已受理订单均已落库且库存一致。 [复测数据与复现命令](docs/performance/2026-11-24-seckill-retest.md)
+2026-11-24 在本机 Linux Docker 中直连 Spring Boot 复测，**500 个请求同时发起、200 张券，四轮全部通过，连接错误为 0**。每轮均落库 200 单，MySQL 与 Redis 库存一致。4 个消费者相较于 1 个，将订单成功可见 P95 从 17.43～18.74 秒降至 11.36～12.24 秒，两组对照均缩短约 **35%**。此前 Windows 宿主机的连接失败已定位到突发建连期间的本机 TCP 监听队列。 [平台对照与复现命令](docs/performance/2026-11-24-seckill-retest.md)
 
 2026-11-05 历史复测（均为 500 请求、200 库存）：100 并发通过，HTTP P95 约 2.04 秒，SUCCESS 可见 P95 约 7.42 秒；500 并发两轮分别出现 97/37 次请求错误，整体失败，分类复测的 37 次均为 `ConnectException`。三轮的 200 个受理订单最终均完成且库存一致。当时的测量观察到了单消费者排队和高并发建连问题。完整对比与原始报告见 [压测记录](docs/SECKILL_LOAD_TEST.md)。
 
